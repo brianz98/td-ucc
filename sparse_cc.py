@@ -80,7 +80,7 @@ class SparseCC:
             scalar, oei, oei, tei_aa, tei_ab, tei_aa
         )
 
-    def make_cluster_operator(self, max_exc, pp=True, brueckner=False):
+    def make_cluster_operator(self, max_exc, pp=True):
         # Prepare the cluster operator (closed-shell case)
         occ = list(range(self.nael))
         vir = list(range(self.nael, self.nmo))
@@ -99,15 +99,7 @@ class SparseCC:
         self.denominators = []
 
         # loop over total excitation level
-        min_exc = 1
-        if brueckner:
-            min_exc = 2
-            # generate singles operators separately
-            self.op_singles = forte.SparseOperatorList()
-            for i in occ:
-                for a in vir:
-                    self.op_single.add(f"{a}a+ {i}a-", 0.0)
-        for n in range(min_exc, max_exc + 1):
+        for n in range(1, max_exc + 1):
             # loop over beta excitation level
             for nb in range(n + 1):
                 na = n - nb
