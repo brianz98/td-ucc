@@ -254,9 +254,9 @@ class SparseCC:
         old_e = 0.0
 
         if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=================================================================")
-            print("   Iteration     Energy (Eh)       Delta Energy (Eh)    Time (s)")
-            print("-----------------------------------------------------------------")
+            print("=" * 65)
+            print(f"{'Iter':<9} {'Energy':<20} {'Delta Energy':<20} {'Time':<11}")
+            print("-" * 65)
 
         for iter in range(maxiter):
             iterstart = time.time()
@@ -271,7 +271,7 @@ class SparseCC:
             # 3. print information
             if self.verbose >= NORMAL_PRINT_LEVEL:
                 print(
-                    f"{iter:9d} {self.energy:20.12f} {self.energy - old_e:20.12f} {iterend-iterstart:11.3f}"
+                    f"{iter:<9d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iterend-iterstart:<11.3f}"
                 )
 
             # 4. check for convergence of the energy
@@ -283,7 +283,7 @@ class SparseCC:
             print("Warning: CC iterations did not converge!")
         self.e_corr = self.energy - self.mf.e_tot
         if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=================================================================")
+            print("=" * 65)
             print(f" Total time: {time.time()-start:11.3f} [s]")
 
         if self.verbose >= MINIMAL_PRINT_LEVEL:
@@ -294,7 +294,7 @@ class SparseCC:
         # Evaluates <Psi_u|exp(-S) d/dt exp(S)|Psi_0> = <Phi_u|U_v+ s_v U_v|Phi_0>
         # U_v = Prod_{i=v}^{N} exp(s_i * t_i(t))
         grad = np.zeros((len(self.op), len(self.op)), dtype=np.complex128)
-        for nu in range(len(self.op)):
+        for nu in reversed(range(len(self.op))):
             op_nu = self.op(nu)
             kappa_nu = forte.SparseOperator()
             kappa_nu.add(op_nu[0], 1.0)
@@ -302,13 +302,15 @@ class SparseCC:
                 kappa_nu.add(op_nu[0].adjoint(), -1.0)
 
             u_nu = forte.SparseOperatorList()
-            for i in range(nu, len(self.op)):
-                u_nu.add(self.op(i)[0], self.op(i)[1])
+            u_nu.add(op_nu[0], op_nu[1])
 
-            psi = self.exp_apply_op(u_nu, self.ref, inverse=False)
-            psi = forte.apply_op(kappa_nu, psi)
-            psi = self.exp_apply_op(u_nu, psi, inverse=True)
-            grad[:, nu] = forte.get_projection(self.op, self.ref, psi)
+            if nu == len(self.op) - 1:
+                u_psi = self.exp_apply_op(u_nu, self.ref, inverse=False)
+            else:
+                u_psi = self.exp_apply_op(u_nu, u_psi, inverse=False)
+            k_u_psi = forte.apply_op(kappa_nu, u_psi)
+            u_k_u_psi = self.exp_apply_op(u_nu, k_u_psi, inverse=True)
+            grad[:, nu] = forte.get_projection(self.op, self.ref, u_k_u_psi)
         return grad
 
     def update_amps_imag_time(self, dt):
@@ -604,7 +606,7 @@ class DIIS:
         B = np.zeros((len(self.vector), len(self.vector)))
         for i in range(len(self.vector)):
             for j in range(len(self.vector)):
-                B[i, j] = np.dot(self.error[i], self.error[j])
+                B[i, j] = np.dot(self.error[i], self.error[j]).real
         A = np.zeros((len(self.vector) + 1, len(self.vector) + 1))
         A[:-1, :-1] = B
         A[-1, :] = -1
