@@ -38,6 +38,7 @@ class SparseCC:
         exp_max_k=19,
         exp_screen_thresh=1e-12,
         ham_screen_thresh=1e-12,
+        frozen_core=0,
     ):
         # get the number of MOs and alpha/beta electrons per irrep
         if cc_type not in ["cc", "ucc", "dcc", "ducc"]:
@@ -49,12 +50,14 @@ class SparseCC:
         self.unitary = "u" in cc_type
         self.root_sym = root_sym
 
-        self.nmo = self.mol.nao
-        self.nael = self.mol.nelec[0]
-        self.nbel = self.mol.nelec[1]
+        self.nmo = self.mol.nao-frozen_core
+        self.nael = self.mol.nelec[0]-frozen_core
+        self.nbel = self.mol.nelec[1]-frozen_core
+        self.eps = self.mf.mo_energy[frozen_core:]
+
         self.point_group = self.mol.groupname
         if self.point_group != "C1":
-            self.orbsym = self.mf.mo_coeff.orbsym
+            self.orbsym = self.mf.mo_coeff.orbsym[frozen_core:]
         else:
             self.orbsym = [0] * self.nmo
         self.occ = list(range(self.nael))
@@ -91,25 +94,40 @@ class SparseCC:
             print(f"Number of beta electrons:  {self.nbel}")
             print(f"Reference determinant:     {hfref.str(self.nmo)}")
 
-        self.make_hamiltonian()
+        self.make_hamiltonian(frozen_core=frozen_core)
 
         self.ref = forte.SparseState({hfref: 1.0})
         eref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
-        assert np.isclose(eref, mf.e_tot)
+        assert np.isclose(
+            eref, mf.e_tot
+        ), f"Reference energy mismatch: {eref} != {mf.e_tot}"
 
-    def make_hamiltonian(self):
+    def make_hamiltonian(self, frozen_core=None):
+        scalar = self.mol.energy_nuc()
+        hcore = np.einsum(
+            "pi,qj,pq->ij", self.mf.mo_coeff, self.mf.mo_coeff, self.mf.get_hcore()
+        )
         eri = pyscf.ao2mo.full(self.mol.intor("int2e"), self.mf.mo_coeff)
+
+        if frozen_core > 0:
+            fc = slice(0, frozen_core)
+            av = slice(frozen_core, None)
+            scalar += 2 * np.einsum("ii", hcore[fc, fc])
+            scalar += 2 * np.einsum("iijj->", eri[fc, fc, fc, fc])
+            scalar -= np.einsum("ijji->", eri[fc, fc, fc, fc])
+            hcore[av, av] += 2 * np.einsum("pqjj->pq", eri[av, av, fc, fc])
+            hcore[av, av] -= np.einsum("pjjq->pq", eri[av, fc, fc, av])
+            hcore = hcore[av, av].copy()
+            eri = eri[av, av, av, av].copy()
+
+        oei_a = forte.ndarray_from_numpy(hcore)
+
         tei = eri.swapaxes(1, 2).copy()
         tei_aa = forte.ndarray_copy_from_numpy(tei - tei.swapaxes(2, 3))
         tei_ab = forte.ndarray_from_numpy(tei)
 
-        hcore = np.einsum(
-            "pi,qj,pq->ij", self.mf.mo_coeff, self.mf.mo_coeff, self.mf.get_hcore()
-        )
-        oei = forte.ndarray_from_numpy(hcore)
-        scalar = self.mol.energy_nuc()
         self.ham_op = forte.sparse_operator_hamiltonian(
-            scalar, oei, oei, tei_aa, tei_ab, tei_aa
+            scalar, oei_a, oei_a, tei_aa, tei_ab, tei_aa
         )
 
     def make_cluster_operator(self, max_exc, pp=True):
@@ -119,10 +137,6 @@ class SparseCC:
             print(f"Virtual orbitals:  {self.vir}")
 
         self.op = forte.SparseOperatorList()
-
-        ea = self.mf.mo_energy
-        eb = self.mf.mo_energy
-
         self.denominators = []
 
         # loop over total excitation level
@@ -149,16 +163,16 @@ class SparseCC:
                                         continue
                                 # compute the denominators
                                 e_aocc = functools.reduce(
-                                    lambda x, y: x + ea[y], ao, 0.0
+                                    lambda x, y: x + self.eps[y], ao, 0.0
                                 )
                                 e_avir = functools.reduce(
-                                    lambda x, y: x + ea[y], av, 0.0
+                                    lambda x, y: x + self.eps[y], av, 0.0
                                 )
                                 e_bocc = functools.reduce(
-                                    lambda x, y: x + eb[y], bo, 0.0
+                                    lambda x, y: x + self.eps[y], bo, 0.0
                                 )
                                 e_bvir = functools.reduce(
-                                    lambda x, y: x + eb[y], bv, 0.0
+                                    lambda x, y: x + self.eps[y], bv, 0.0
                                 )
                                 self.denominators.append(
                                     e_aocc + e_bocc - e_bvir - e_avir
