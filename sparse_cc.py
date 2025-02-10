@@ -43,6 +43,8 @@ class SparseCC:
         # get the number of MOs and alpha/beta electrons per irrep
         if cc_type not in ["cc", "ucc", "dcc", "ducc"]:
             raise RuntimeError("Invalid CC type")
+        if not isinstance(frozen_core, int):
+            raise RuntimeError("frozen_core must be an integer")
         self.mf = mf
         self.verbose = verbose
         self.mol = mf.mol
@@ -50,9 +52,9 @@ class SparseCC:
         self.unitary = "u" in cc_type
         self.root_sym = root_sym
 
-        self.nmo = self.mol.nao-frozen_core
-        self.nael = self.mol.nelec[0]-frozen_core
-        self.nbel = self.mol.nelec[1]-frozen_core
+        self.nmo = self.mol.nao - frozen_core
+        self.nael = self.mol.nelec[0] - frozen_core
+        self.nbel = self.mol.nelec[1] - frozen_core
         self.eps = self.mf.mo_energy[frozen_core:]
 
         self.point_group = self.mol.groupname
