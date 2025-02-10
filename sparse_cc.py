@@ -33,17 +33,20 @@ class SparseCC:
         self,
         mf,
         verbose=False,
-        unitary=False,
+        cc_type="cc",
         root_sym=0,
         exp_max_k=19,
         exp_screen_thresh=1e-12,
         ham_screen_thresh=1e-12,
     ):
         # get the number of MOs and alpha/beta electrons per irrep
+        if cc_type not in ["cc", "ucc", "dcc", "ducc"]:
+            raise RuntimeError("Invalid CC type")
         self.mf = mf
         self.verbose = verbose
         self.mol = mf.mol
-        self.unitary = unitary
+        self.factorized = "d" in cc_type
+        self.unitary = "u" in cc_type
         self.root_sym = root_sym
 
         self.nmo = self.mol.nao
@@ -57,7 +60,12 @@ class SparseCC:
         self.occ = list(range(self.nael))
         self.vir = list(range(self.nael, self.nmo))
 
-        self.exp_op = forte.SparseExp(maxk=exp_max_k, screen_thresh=exp_screen_thresh)
+        if self.factorized:
+            self.exp_op = forte.SparseFactExp(screen_thresh=exp_screen_thresh)
+        else:
+            self.exp_op = forte.SparseExp(
+                maxk=exp_max_k, screen_thresh=exp_screen_thresh
+            )
         if self.unitary:
             self.exp_apply_op = self.exp_op.apply_antiherm
         else:
@@ -175,13 +183,19 @@ class SparseCC:
 
     def cc_residual_equations(self):
         # Step 1. Compute exp(T)|Phi>
-        wfn = self.exp_apply_op(self.op, self.ref, scaling_factor=1.0)
+        if self.factorized:
+            wfn = self.exp_apply_op(self.op, self.ref, inverse=False)
+        else:
+            wfn = self.exp_apply_op(self.op, self.ref, scaling_factor=1.0)
 
         # Step 2. Compute H exp(T)|Phi>
         Hwfn = forte.apply_op(self.ham_op, wfn, screen_thresh=self.ham_screen_thresh)
 
         # Step 3. Compute exp(-T) H exp(T)|Phi>
-        R = self.exp_apply_op(self.op, Hwfn, scaling_factor=-1.0)
+        if self.factorized:
+            R = self.exp_apply_op(self.op, Hwfn, inverse=True)
+        else:
+            R = self.exp_apply_op(self.op, Hwfn, scaling_factor=-1.0)
 
         # Step 4. Project residual onto excited determinants
         self.residual = forte.get_projection(self.op, self.ref, R)
@@ -206,8 +220,146 @@ class SparseCC:
         else:
             self.op.set_coefficients(t)
 
+    def kernel(self, **kwargs):
+        e_conv = kwargs.get("e_conv", 1e-12)
+        maxiter = kwargs.get("maxiter", 100)
+        diis_nvecs = kwargs.get("diis_nvecs", 6)
+        diis_start = kwargs.get("diis_start", 2)
+
+        diis = DIIS(diis_nvecs, diis_start)
+
+        start = time.time()
+
+        # initialize T = 0
+        t = [0.0] * len(self.op)
+        self.op.set_coefficients(t)
+
+        # initalize E = 0
+        old_e = 0.0
+
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=================================================================")
+            print("   Iteration     Energy (Eh)       Delta Energy (Eh)    Time (s)")
+            print("-----------------------------------------------------------------")
+
+        for iter in range(maxiter):
+            iterstart = time.time()
+            # 1. evaluate the CC residual equations
+            self.cc_residual_equations()
+
+            # 2. update the CC equations
+            self.update_amps(diis)
+
+            iterend = time.time()
+
+            # 3. print information
+            if self.verbose >= NORMAL_PRINT_LEVEL:
+                print(
+                    f"{iter:9d} {self.energy:20.12f} {self.energy - old_e:20.12f} {iterend-iterstart:11.3f}"
+                )
+
+            # 4. check for convergence of the energy
+            if abs(self.energy - old_e) < e_conv:
+                break
+            old_e = self.energy
+
+        if iter == maxiter - 1:
+            print("Warning: CC iterations did not converge!")
+        self.e_corr = self.energy - self.mf.e_tot
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=================================================================")
+            print(f" Total time: {time.time()-start:11.3f} [s]")
+
+        if self.verbose >= MINIMAL_PRINT_LEVEL:
+            print(f" CC energy:             {self.energy:20.12f} [Eh]")
+            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
+
+    def evaluate_grad_ovlp(self):
+        # Evaluates <Psi_u|exp(-S) d/dt exp(S)|Psi_0> = <Phi_u|U_v+ s_v U_v|Phi_0>
+        # U_v = Prod_{i=v}^{N} exp(s_i * t_i(t))
+        grad = np.zeros((len(self.op), len(self.op)), dtype=np.complex128)
+        for nu in range(len(self.op)):
+            op_nu = self.op(nu)
+            kappa_nu = forte.SparseOperator()
+            kappa_nu.add(op_nu[0], 1.0)
+            if self.unitary:
+                kappa_nu.add(op_nu[0].adjoint(), -1.0)
+
+            u_nu = forte.SparseOperatorList()
+            for i in range(nu, len(self.op)):
+                u_nu.add(self.op(i)[0], self.op(i)[1])
+
+            psi = self.exp_apply_op(u_nu, self.ref, inverse=False)
+            psi = forte.apply_op(kappa_nu, psi)
+            psi = self.exp_apply_op(u_nu, psi, inverse=True)
+            grad[:, nu] = forte.get_projection(self.op, self.ref, psi)
+        return grad
+
+    def update_amps_imag_time(self, dt):
+        t = self.op.coefficients()
+        grad = self.evaluate_grad_ovlp()
+        delta = np.linalg.solve(grad, self.residual)
+        # update the amplitudes
+        for i in range(len(self.op)):
+            t[i] -= delta[i] * dt
+        # push new amplitudes to the T operator
+        self.op.set_coefficients(t)
+
+    def imag_time_relaxation(self, dt=0.005, **kwargs):
+        e_conv = kwargs.get("e_conv", 1e-8)
+        maxiter = kwargs.get("maxiter", 1000)
+        start = time.time()
+
+        # initialize T = 0
+        t = [0.0] * len(self.op)
+        self.op.set_coefficients(t)
+
+        # initalize E = 0
+        old_e = 0.0
+
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=" * 80)
+            print(
+                f"{'Iter':^5} {'Energy':^20} {'Delta Energy':^20} {'Imag Time':^15} {'Time':^15}"
+            )
+            print("-" * 80)
+
+        for iter in range(maxiter):
+            iterstart = time.time()
+            # 1. evaluate the CC residual equations
+            self.cc_residual_equations()
+
+            # 2. update the CC equations
+            self.update_amps_imag_time(dt)
+
+            iterend = time.time()
+
+            # 3. print information
+            if self.verbose >= NORMAL_PRINT_LEVEL:
+                print(
+                    f"{iter:<5d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iter*dt:<15.3f} {iterend-iterstart:<15.3f}"
+                )
+
+            # 4. check for convergence of the energy
+            if abs(self.energy - old_e) < e_conv:
+                break
+            old_e = self.energy
+
+        if iter == maxiter - 1:
+            print("Warning: CC iterations did not converge!")
+        self.e_corr = self.energy - self.mf.e_tot
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=" * 80)
+            print(f" Total time: {time.time()-start:11.3f} [s]")
+
+        if self.verbose >= MINIMAL_PRINT_LEVEL:
+            print(f" CC energy:             {self.energy:20.12f} [Eh]")
+            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
+
     def make_ee_eom_basis(self, max_exc):
-        _ee_eom_basis = [self.ref]  # Reference determinant (0 excitations)
+        # EE-EOMCC
+        # R = [1, t_i^a, t_ij^ab, ...]
+        _ee_eom_basis = [self.ref]  # Reference determinant
 
         for k in range(1, max_exc + 1):  # k is the excitation level
             for ak in range(k + 1):  # alpha excitation level
@@ -238,7 +390,7 @@ class SparseCC:
         return _ee_eom_basis
 
     def make_ip_eom_basis(self, max_exc):
-        # IP-EOM-CCSD
+        # IP-EOMCC
         # R = [t_{i}^{}, t_{ij}^{a}, ...]
 
         _ip_eom_basis = []
@@ -276,7 +428,7 @@ class SparseCC:
         return _ip_eom_basis
 
     def make_ea_eom_basis(self, max_exc):
-        # EA-EOM-CCSD
+        # EA-EOM-CC
         # R = [t_{}^{a}, t_{i}^{ab}, ...]
 
         _ea_eom_basis = []
@@ -320,22 +472,22 @@ class SparseCC:
         algo = "oprod" if self.unitary else "naive"
 
         if algo == "naive":
-            for i in range(len(dets)):
-                for j in range(i, len(dets)):
-                    # exp(S)|j>
-                    wfn = self.exp_apply_op(
-                        self.op,
-                        dets[j],
-                        scaling_factor=1.0,
-                    )
-                    # H exp(S)|j>
-                    Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
-                    # exp(-S) H exp(S)|j>
-                    R = self.exp_apply_op(
-                        self.op,
-                        Hwfn,
-                        scaling_factor=-1.0,
-                    )
+            for j in range(len(dets)):
+                # exp(S)|j>
+                wfn = self.exp_apply_op(
+                    self.op,
+                    dets[j],
+                    scaling_factor=1.0,
+                )
+                # H exp(S)|j>
+                Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
+                # exp(-S) H exp(S)|j>
+                R = self.exp_apply_op(
+                    self.op,
+                    Hwfn,
+                    scaling_factor=-1.0,
+                )
+                for i in range(j, len(dets)):
                     # <i|exp(-S) H exp(S)|j>
                     H[i, j] = forte.overlap(dets[i], R)
                     H[j, i] = H[i, j]
@@ -411,60 +563,6 @@ class SparseCC:
                     f"{i:^4d} {self.eom_eigval[self.eom_eigval_argsort[i]]:^25.12f} {abs(s2_val):^10.3f} {abs(s):^5.1f}"
                 )
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
-
-    def kernel(self, **kwargs):
-        e_conv = kwargs.get("e_conv", 1e-12)
-        maxiter = kwargs.get("maxiter", 100)
-        diis_nvecs = kwargs.get("diis_nvecs", 6)
-        diis_start = kwargs.get("diis_start", 2)
-
-        diis = DIIS(diis_nvecs, diis_start)
-
-        start = time.time()
-
-        # initialize T = 0
-        t = [0.0] * len(self.op)
-        self.op.set_coefficients(t)
-
-        # initalize E = 0
-        old_e = 0.0
-
-        if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=================================================================")
-            print("   Iteration     Energy (Eh)       Delta Energy (Eh)    Time (s)")
-            print("-----------------------------------------------------------------")
-
-        for iter in range(maxiter):
-            iterstart = time.time()
-            # 1. evaluate the CC residual equations
-            self.cc_residual_equations()
-
-            # 2. update the CC equations
-            self.update_amps(diis)
-
-            iterend = time.time()
-
-            # 3. print information
-            if self.verbose >= NORMAL_PRINT_LEVEL:
-                print(
-                    f"{iter:9d} {self.energy:20.12f} {self.energy - old_e:20.12f} {iterend-iterstart:11.3f}"
-                )
-
-            # 4. check for convergence of the energy
-            if abs(self.energy - old_e) < e_conv:
-                break
-            old_e = self.energy
-
-        if iter == maxiter - 1:
-            print("Warning: CC iterations did not converge!")
-        self.e_corr = self.energy - self.mf.e_tot
-        if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=================================================================")
-            print(f" Total time: {time.time()-start:11.3f} [s]")
-
-        if self.verbose >= MINIMAL_PRINT_LEVEL:
-            print(f" CC energy:             {self.energy:20.12f} [Eh]")
-            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
 
 class DIIS:
