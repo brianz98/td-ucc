@@ -12,6 +12,8 @@ MINIMAL_PRINT_LEVEL = 1
 NORMAL_PRINT_LEVEL = 2
 DEBUG_PRINT_LEVEL = 3
 
+NIRREP = {"c1": 1, "cs": 2, "ci": 2, "c2": 2, "c2v": 4, "c2h": 4, "d2": 4, "d2h": 8}
+
 
 def sym_dir_prod(sym_list):
     if len(sym_list) == 0:
@@ -28,59 +30,39 @@ def power_method(ham_op, psi_0, iter):
         psi_old = forte.normalize(psi_new)
 
 
-class SparseCC:
+class SparseBase:
     def __init__(
-        self,
-        mf,
-        verbose=False,
-        cc_type="cc",
-        root_sym=0,
-        exp_max_k=19,
-        exp_screen_thresh=1e-12,
-        ham_screen_thresh=1e-12,
-        frozen_core=0,
+        self, mf, verbose=False, root_sym=0, mo_space=None, ham_screen_thresh=1e-12
     ):
-        # get the number of MOs and alpha/beta electrons per irrep
-        if cc_type not in ["cc", "ucc", "dcc", "ducc"]:
-            raise RuntimeError("Invalid CC type")
-        if not isinstance(frozen_core, int):
-            raise RuntimeError("frozen_core must be an integer")
         self.mf = mf
-        self.verbose = verbose
         self.mol = mf.mol
-        self.factorized = "d" in cc_type
-        self.unitary = "u" in cc_type
         self.root_sym = root_sym
+        self.verbose = verbose
 
-        self.nmo = self.mol.nao - frozen_core
-        self.nael = self.mol.nelec[0] - frozen_core
-        self.nbel = self.mol.nelec[1] - frozen_core
-        self.eps = self.mf.mo_energy[frozen_core:]
+        if mo_space is None:
+            mo_space = {}
+            mo_space["frzn"] = slice(0, 0)
+            mo_space["corr"] = slice(0, self.mol.nao)
+        self.frzn = mo_space["frzn"]
+        self.corr = mo_space["corr"]
+        self.nfrzn = self.frzn.stop
+        self.ncorr = self.corr.stop - self.nfrzn
 
-        self.point_group = self.mol.groupname
-        if self.point_group != "C1":
-            self.orbsym = self.mf.mo_coeff.orbsym[frozen_core:]
+        self.nmo = self.ncorr
+        self.nael = self.mol.nelec[0] - self.nfrzn
+        self.nbel = self.mol.nelec[1] - self.nfrzn
+        self.eps = self.mf.mo_energy[self.corr]
+
+        self.point_group = self.mol.groupname.lower()
+        if self.point_group != "c1":
+            self.orbsym = self.mf.mo_coeff.orbsym[self.corr]
         else:
             self.orbsym = [0] * self.nmo
+
+        self.nirrep = NIRREP[self.point_group]
         self.occ = list(range(self.nael))
         self.vir = list(range(self.nael, self.nmo))
-
-        if self.factorized:
-            self.exp_op = forte.SparseFactExp(screen_thresh=exp_screen_thresh)
-        else:
-            self.exp_op = forte.SparseExp(
-                maxk=exp_max_k, screen_thresh=exp_screen_thresh
-            )
-        if self.unitary:
-            self.exp_apply_op = self.exp_op.apply_antiherm
-        else:
-            self.exp_apply_op = self.exp_op.apply_op
         self.ham_screen_thresh = ham_screen_thresh
-
-        if self.nael != self.nbel:
-            raise RuntimeError(
-                "The number of alpha and beta electrons must be the same"
-            )
 
         # Specify the occupation of the the Hartree–Fock determinant
         hfref = forte.Determinant()
@@ -96,7 +78,7 @@ class SparseCC:
             print(f"Number of beta electrons:  {self.nbel}")
             print(f"Reference determinant:     {hfref.str(self.nmo)}")
 
-        self.make_hamiltonian(frozen_core=frozen_core)
+        self.make_hamiltonian()
 
         self.ref = forte.SparseState({hfref: 1.0})
         eref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
@@ -104,23 +86,29 @@ class SparseCC:
             eref, mf.e_tot
         ), f"Reference energy mismatch: {eref} != {mf.e_tot}"
 
-    def make_hamiltonian(self, frozen_core=None):
+    def make_hamiltonian(self):
         scalar = self.mol.energy_nuc()
         hcore = np.einsum(
             "pi,qj,pq->ij", self.mf.mo_coeff, self.mf.mo_coeff, self.mf.get_hcore()
         )
         eri = pyscf.ao2mo.full(self.mol.intor("int2e"), self.mf.mo_coeff)
 
-        if frozen_core > 0:
-            fc = slice(0, frozen_core)
-            av = slice(frozen_core, None)
-            scalar += 2 * np.einsum("ii", hcore[fc, fc])
-            scalar += 2 * np.einsum("iijj->", eri[fc, fc, fc, fc])
-            scalar -= np.einsum("ijji->", eri[fc, fc, fc, fc])
-            hcore[av, av] += 2 * np.einsum("pqjj->pq", eri[av, av, fc, fc])
-            hcore[av, av] -= np.einsum("pjjq->pq", eri[av, fc, fc, av])
-            hcore = hcore[av, av].copy()
-            eri = eri[av, av, av, av].copy()
+        if self.nfrzn > 0:
+            scalar += 2 * np.einsum("ii", hcore[self.frzn, self.frzn])
+            scalar += 2 * np.einsum(
+                "iijj->", eri[self.frzn, self.frzn, self.frzn, self.frzn]
+            )
+            scalar -= np.einsum(
+                "ijji->", eri[self.frzn, self.frzn, self.frzn, self.frzn]
+            )
+            hcore[self.corr, self.corr] += 2 * np.einsum(
+                "pqjj->pq", eri[self.corr, self.corr, self.frzn, self.frzn]
+            )
+            hcore[self.corr, self.corr] -= np.einsum(
+                "pjjq->pq", eri[self.corr, self.frzn, self.frzn, self.corr]
+            )
+            hcore = hcore[self.corr, self.corr].copy()
+            eri = eri[self.corr, self.corr, self.corr, self.corr].copy()
 
         oei_a = forte.ndarray_from_numpy(hcore)
 
@@ -131,6 +119,107 @@ class SparseCC:
         self.ham_op = forte.sparse_operator_hamiltonian(
             scalar, oei_a, oei_a, tei_aa, tei_ab, tei_aa
         )
+
+    get_mo_space = NotImplemented
+
+
+class SparseCI(SparseBase):
+    def __init__(
+        self,
+        mf,
+        ncas,
+        nelecas,
+        verbose=False,
+        root_sym=0,
+        ham_screen_thresh=1e-12,
+    ):
+        mo_space = self.get_mo_space(mf, ncas, nelecas)
+        super().__init__(
+            mf,
+            verbose=verbose,
+            root_sym=root_sym,
+            mo_space=mo_space,
+            ham_screen_thresh=ham_screen_thresh,
+        )
+
+    def get_mo_space(self, mf, ncas, nelecas):
+        assert isinstance(nelecas, int), "nelecas must be an integer"
+        mo_space = {}
+        nelec = mf.mol.nelectron
+        nfrzn = (nelec - nelecas) // 2
+        mo_space["frzn"] = slice(0, nfrzn)
+        mo_space["corr"] = slice(nfrzn, nfrzn + ncas)
+        mo_space["virt"] = slice(nfrzn + ncas, mf.mol.nao)
+        return mo_space
+
+    def make_hamiltonian_matrix(self):
+        ndets = len(self.dets)
+        self.hmat = np.zeros((ndets, ndets), dtype=np.complex128)
+        for i in range(ndets):
+            idet = forte.SparseState({self.dets[i]: 1.0})
+            h_idet = forte.apply_op(self.ham_op, idet)
+            for j in range(i, ndets):
+                jdet = forte.SparseState({self.dets[j]: 1.0})
+                self.hmat[i, j] = forte.overlap(jdet, h_idet)
+                self.hmat[j, i] = self.hmat[i, j]
+
+    def kernel(self):
+        self.dets = forte.hilbert_space(
+            self.nmo, self.nael, self.nbel, self.nirrep, self.orbsym, self.root_sym
+        )
+        self.make_hamiltonian_matrix()
+        self.eigvals, self.eigvecs = np.linalg.eigh(self.hmat)
+
+
+class SparseCC(SparseBase):
+    def __init__(
+        self,
+        mf,
+        verbose=False,
+        cc_type="cc",
+        root_sym=0,
+        exp_max_k=19,
+        exp_screen_thresh=1e-12,
+        ham_screen_thresh=1e-12,
+        frozen_core=0,
+    ):
+        mo_space = self.get_mo_space(mf, frozen_core)
+        super().__init__(
+            mf,
+            verbose=verbose,
+            root_sym=root_sym,
+            mo_space=mo_space,
+            ham_screen_thresh=ham_screen_thresh,
+        )
+        # get the number of MOs and alpha/beta electrons per irrep
+        if cc_type not in ["cc", "ucc", "dcc", "ducc"]:
+            raise RuntimeError("Invalid CC type")
+
+        self.verbose = verbose
+        self.factorized = "d" in cc_type
+        self.unitary = "u" in cc_type
+
+        if self.factorized:
+            self.exp_op = forte.SparseFactExp(screen_thresh=exp_screen_thresh)
+        else:
+            self.exp_op = forte.SparseExp(
+                maxk=exp_max_k, screen_thresh=exp_screen_thresh
+            )
+        if self.unitary:
+            self.exp_apply_op = self.exp_op.apply_antiherm
+        else:
+            self.exp_apply_op = self.exp_op.apply_op
+
+        if self.nael != self.nbel:
+            raise RuntimeError(
+                "The number of alpha and beta electrons must be the same"
+            )
+
+    def get_mo_space(self, mf, frozen_core):
+        mo_space = {}
+        mo_space["frzn"] = slice(0, frozen_core)
+        mo_space["corr"] = slice(frozen_core, mf.mol.nao)
+        return mo_space
 
     def make_cluster_operator(self, max_exc, pp=True):
         # Prepare the cluster operator (closed-shell case)
