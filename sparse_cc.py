@@ -65,22 +65,22 @@ class SparseBase:
         self.ham_screen_thresh = ham_screen_thresh
 
         # Specify the occupation of the the Hartree–Fock determinant
-        hfref = forte.Determinant()
+        self.hfref = forte.Determinant()
         # set the occupation numbers of the determinant
         for i in range(self.nael):
-            hfref.set_alfa_bit(i, True)
+            self.hfref.set_alfa_bit(i, True)
         for i in range(self.nbel):
-            hfref.set_beta_bit(i, True)
+            self.hfref.set_beta_bit(i, True)
 
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"Number of orbitals:        {self.nmo}")
             print(f"Number of alpha electrons: {self.nael}")
             print(f"Number of beta electrons:  {self.nbel}")
-            print(f"Reference determinant:     {hfref.str(self.nmo)}")
+            print(f"Reference determinant:     {self.hfref.str(self.nmo)}")
 
         self.make_hamiltonian()
 
-        self.ref = forte.SparseState({hfref: 1.0})
+        self.ref = forte.SparseState({self.hfref: 1.0})
         eref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
         assert np.isclose(
             eref, mf.e_tot
@@ -277,9 +277,7 @@ class SparseCC(SparseBase):
                                 e_bvir = functools.reduce(
                                     lambda x, y: x + self.eps[y], bv, 0.0
                                 )
-                                self.tn_denom.append(
-                                    e_aocc + e_bocc - e_bvir - e_avir
-                                )
+                                self.tn_denom.append(e_aocc + e_bocc - e_bvir - e_avir)
                                 op_str = []  # a list to hold the operator triplets
                                 for i in av:
                                     op_str.append(f"{i}a+")
@@ -476,58 +474,32 @@ class SparseCC(SparseBase):
             print(f" CC energy:             {self.energy:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
-    def make_ee_eom_basis(self, max_exc):
-        # EE-EOMCC
-        # R = [1, t_i^a, t_ij^ab, ...]
-        _ee_eom_basis = [self.ref]  # Reference determinant
+    def make_eom_basis(self, nhole, npart, ms2=0):
+        states = []
+        dets = []
 
-        for k in range(1, max_exc + 1):  # k is the excitation level
-            for ak in range(k + 1):  # alpha excitation level
-                bk = k - ak
-                for ao in itertools.combinations(self.occ, self.nael - ak):
-                    ao_sym = sym_dir_prod(self.orbsym[list(ao)])
-                    for av in itertools.combinations(self.vir, ak):
-                        av_sym = sym_dir_prod(self.orbsym[list(av)])
-                        for bo in itertools.combinations(self.occ, self.nbel - bk):
-                            bo_sym = sym_dir_prod(self.orbsym[list(bo)])
-                            for bv in itertools.combinations(self.vir, bk):
-                                bv_sym = sym_dir_prod(self.orbsym[list(bv)])
-                                if ao_sym ^ av_sym ^ bo_sym ^ bv_sym != self.root_sym:
-                                    continue
-                                d = forte.Determinant()
-                                for i in ao:
-                                    d.set_alfa_bit(i, True)
-                                for i in av:
-                                    d.set_alfa_bit(i, True)
-                                for i in bo:
-                                    d.set_beta_bit(i, True)
-                                for i in bv:
-                                    d.set_beta_bit(i, True)
-                                _ee_eom_basis.append(forte.SparseState({d: 1.0}))
+        hp = []
+        if nhole >= npart:
+            for i in range(npart + 1):
+                hp.append((i + nhole - npart, i))
+        else:
+            for i in range(nhole + 1):
+                hp.append((i, i + npart - nhole))
 
-        print(f"Number of EE-EOM basis states: {len(_ee_eom_basis)}")
-
-        return _ee_eom_basis
-
-    def make_ip_eom_basis(self, max_exc):
-        # IP-EOMCC
-        # R = [t_{i}^{}, t_{ij}^{a}, ...]
-
-        _ip_eom_basis = []
-
-        for k in range(1, max_exc + 1):  # k is the excitation level
-            j = k - 1  # number of creation operators
-            for ak in range(k + 1):  # alpha excitation level
-                bk = k - ak  # beta excitation level
-                for aj in range(j + 1):
-                    bj = j - aj
-                    for ao in itertools.combinations(self.occ, self.nael - ak):
+        for h, p in hp:
+            for ah in range(h + 1):
+                bh = h - ah
+                for ap in range(p + 1):
+                    bp = p - ap
+                    if (ah-ap) - (bh-bp) != ms2:
+                        continue
+                    for ao in itertools.combinations(self.occ, self.nael - ah):
                         ao_sym = sym_dir_prod(self.orbsym[list(ao)])
-                        for av in itertools.combinations(self.vir, aj):
+                        for av in itertools.combinations(self.vir, ap):
                             av_sym = sym_dir_prod(self.orbsym[list(av)])
-                            for bo in itertools.combinations(self.occ, self.nbel - bk):
+                            for bo in itertools.combinations(self.occ, self.nbel - bh):
                                 bo_sym = sym_dir_prod(self.orbsym[list(bo)])
-                                for bv in itertools.combinations(self.vir, bj):
+                                for bv in itertools.combinations(self.vir, bp):
                                     bv_sym = sym_dir_prod(self.orbsym[list(bv)])
                                     if (
                                         ao_sym ^ av_sym ^ bo_sym ^ bv_sym
@@ -543,55 +515,36 @@ class SparseCC(SparseBase):
                                         d.set_beta_bit(i, True)
                                     for i in bv:
                                         d.set_beta_bit(i, True)
-                                    _ip_eom_basis.append(forte.SparseState({d: 1.0}))
-
-        return _ip_eom_basis
-
-    def make_ea_eom_basis(self, max_exc):
-        # EA-EOM-CC
-        # R = [t_{}^{a}, t_{i}^{ab}, ...]
-
-        _ea_eom_basis = []
-
-        for k in range(
-            1, max_exc + 1
-        ):  # k is the creation level (number of creation operators)
-            j = k - 1  # number of annihilation operators
-            for ak in range(k + 1):  # alpha creation level
-                bk = k - ak  # beta creation level
-                for aj in range(j + 1):  # alpha annihilation level
-                    bj = j - aj  # beta annihilation level
-                    for ao in itertools.combinations(self.occ, self.nael - aj):
-                        ao_sym = sym_dir_prod(self.orbsym[list(ao)])
-                        for av in itertools.combinations(self.vir, ak):
-                            av_sym = sym_dir_prod(self.orbsym[list(av)])
-                            for bo in itertools.combinations(self.occ, self.nbel - bj):
-                                bo_sym = sym_dir_prod(self.orbsym[list(bo)])
-                                for bv in itertools.combinations(self.vir, bk):
-                                    bv_sym = sym_dir_prod(self.orbsym[list(bv)])
-                                    if (
-                                        ao_sym ^ av_sym ^ bo_sym ^ bv_sym
-                                        != self.root_sym
-                                    ):
-                                        continue
-                                    d = forte.Determinant()
-                                    for i in ao:
-                                        d.set_alfa_bit(i, True)
-                                    for i in av:
-                                        d.set_alfa_bit(i, True)
-                                    for i in bo:
-                                        d.set_beta_bit(i, True)
-                                    for i in bv:
-                                        d.set_beta_bit(i, True)
-                                    _ea_eom_basis.append(forte.SparseState({d: 1.0}))
-
-        return _ea_eom_basis
+                                    dets.append(d)
+                                    states.append(forte.SparseState({d: 1.0}))
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print(f"Number of {nhole}h{npart}p EOM states: {len(states)}")
+        print(states)
+        s2 = forte.s2_matrix(dets).nph
+        return states, s2
 
     def make_hbar(self, dets):
         H = np.zeros((len(dets), len(dets)), dtype=np.complex128)
-        algo = "oprod" if self.unitary else "naive"
 
-        if algo == "naive":
+        if self.unitary:
+            _wfn_list = []
+            _Hwfn_list = []
+
+            for i in range(len(dets)):
+                wfn = self.exp_apply_op(
+                    self.op,
+                    dets[i],
+                    scaling_factor=1.0,
+                )
+                Hwfn = forte.apply_op(self.ham_op, wfn)
+                _wfn_list.append(wfn)
+                _Hwfn_list.append(Hwfn)
+
+            for i in range(len(dets)):
+                for j in range(len(dets)):
+                    H[i, j] = forte.overlap(_wfn_list[i], _Hwfn_list[j])
+                    H[j, i] = H[i, j]
+        else:
             for j in range(len(dets)):
                 # exp(S)|j>
                 wfn = self.exp_apply_op(
@@ -611,28 +564,10 @@ class SparseCC(SparseBase):
                     # <i|exp(-S) H exp(S)|j>
                     H[i, j] = forte.overlap(dets[i], R)
                     H[j, i] = H[i, j]
-        elif algo == "oprod":
-            _wfn_list = []
-            _Hwfn_list = []
-
-            for i in range(len(dets)):
-                wfn = self.exp_apply_op(
-                    self.op,
-                    dets[i],
-                    scaling_factor=1.0,
-                )
-                Hwfn = forte.apply_op(self.ham_op, wfn)
-                _wfn_list.append(wfn)
-                _Hwfn_list.append(Hwfn)
-
-            for i in range(len(dets)):
-                for j in range(len(dets)):
-                    H[i, j] = forte.overlap(_wfn_list[i], _Hwfn_list[j])
-                    H[j, i] = H[i, j]
 
         return H
 
-    def run_eom(self, max_exc, mode, print_eigvals=True):
+    def run_eom(self, nhole, npart, ms2, print_eigvals=True):
         if self.unitary:
 
             def _eig(H):
@@ -650,20 +585,7 @@ class SparseCC(SparseBase):
                 eigval = np.real(eigval)
                 return eigval, eigvec, eigval_argsort
 
-        if mode == "ip":
-            self.eom_basis = self.make_ip_eom_basis(max_exc)
-        elif mode == "ea":
-            self.eom_basis = self.make_ea_eom_basis(max_exc)
-        elif mode == "ee":
-            self.eom_basis = self.make_ee_eom_basis(max_exc)
-
-        self.s2 = np.zeros((len(self.eom_basis),) * 2)
-        for i, ibasis in enumerate(self.eom_basis):
-            for j, jbasis in enumerate(self.eom_basis):
-                self.s2[i, j] = forte.spin2(
-                    next(ibasis.items())[0], next(jbasis.items())[0]
-                )
-
+        self.eom_basis, self.s2 = self.make_eom_basis(nhole, npart, ms2)
         self.eom_hbar = self.make_hbar(self.eom_basis)
         self.eom_eigval, self.eom_eigvec, self.eom_eigval_argsort = _eig(self.eom_hbar)
 
@@ -676,7 +598,7 @@ class SparseCC(SparseBase):
                     self.eom_eigvec[:, self.eom_eigval_argsort[i]].T
                     @ self.s2
                     @ self.eom_eigvec[:, self.eom_eigval_argsort[i]]
-                )
+                )[0]
                 s = round(2 * (-1 + np.sqrt(1 + 4 * s2_val)))
                 s /= 4
                 print(
