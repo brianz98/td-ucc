@@ -227,8 +227,20 @@ class SparseCC(SparseBase):
             print(f"Occupied orbitals: {self.occ}")
             print(f"Virtual orbitals:  {self.vir}")
 
-        self.op = forte.SparseOperatorList()
-        self.denominators = []
+        self.t1 = forte.SparseOperatorList()
+        self.tn = forte.SparseOperatorList()
+        self.t1_denom = []
+        self.tn_denom = []
+
+        # do singles first
+        for i in self.occ:
+            for a in self.vir:
+                if self.orbsym[i] ^ self.orbsym[a] != self.root_sym:
+                    continue
+                self.t1.add(f"{a}a+ {i}a-", 0.0)
+                self.t1_denom.append(self.eps[a] - self.eps[i])
+                self.t1.add(f"{a}b+ {i}b-", 0.0)
+                self.t1_denom.append(self.eps[a] - self.eps[i])
 
         # loop over total excitation level
         for n in range(1, max_exc + 1):
@@ -265,7 +277,7 @@ class SparseCC(SparseBase):
                                 e_bvir = functools.reduce(
                                     lambda x, y: x + self.eps[y], bv, 0.0
                                 )
-                                self.denominators.append(
+                                self.tn_denom.append(
                                     e_aocc + e_bocc - e_bvir - e_avir
                                 )
                                 op_str = []  # a list to hold the operator triplets
@@ -277,13 +289,16 @@ class SparseCC(SparseBase):
                                     op_str.append(f"{i}b-")
                                 for i in reversed(ao):
                                     op_str.append(f"{i}a-")
-                                self.op.add(f"{' '.join(op_str)}", 0.0)
-
+                                self.tn.add(f"{' '.join(op_str)}", 0.0)
+        self.op = self.t1 + self.tn
+        self.denominators = self.t1_denom + self.tn_denom
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"\n==> Cluster operator <==")
-            print(f"Number of amplitudes: {len(self.op)}")
+            print(f"Number of amplitudes: {len(self.t1)+len(self.tn)}")
             print(f"Operator components:")
-            for sqop, c in self.op:
+            for sqop, c in self.t1:
+                print(f"{sqop}")
+            for sqop, c in self.tn:
                 print(f"{sqop}")
 
     def cc_residual_equations(self):
