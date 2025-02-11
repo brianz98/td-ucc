@@ -238,12 +238,12 @@ class SparseCC(SparseBase):
                 if self.orbsym[i] ^ self.orbsym[a] != self.root_sym:
                     continue
                 self.t1.add(f"{a}a+ {i}a-", 0.0)
-                self.t1_denom.append(self.eps[a] - self.eps[i])
+                self.t1_denom.append(self.eps[i] - self.eps[a])
                 self.t1.add(f"{a}b+ {i}b-", 0.0)
-                self.t1_denom.append(self.eps[a] - self.eps[i])
+                self.t1_denom.append(self.eps[i] - self.eps[a])
 
         # loop over total excitation level
-        for n in range(1, max_exc + 1):
+        for n in range(2, max_exc + 1):
             # loop over beta excitation level
             for nb in range(n + 1):
                 na = n - nb
@@ -294,11 +294,9 @@ class SparseCC(SparseBase):
         self.denominators = self.t1_denom + self.tn_denom
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"\n==> Cluster operator <==")
-            print(f"Number of amplitudes: {len(self.t1)+len(self.tn)}")
+            print(f"Number of amplitudes: {len(self.op)}")
             print(f"Operator components:")
-            for sqop, c in self.t1:
-                print(f"{sqop}")
-            for sqop, c in self.tn:
+            for sqop, c in self.op:
                 print(f"{sqop}")
 
     def cc_residual_equations(self):
