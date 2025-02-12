@@ -3,8 +3,8 @@ import functools
 import time
 import numpy as np
 import forte, forte.utils
-import wicked as w
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
+from pyscf.lib.linalg_helper import davidson1
 from collections import deque
 import scipy, scipy.linalg
 
@@ -19,15 +19,6 @@ def sym_dir_prod(sym_list):
     if len(sym_list) == 0:
         return 0
     return functools.reduce(lambda x, y: x ^ y, sym_list)
-
-
-def power_method(ham_op, psi_0, iter):
-    psi_old = psi_0
-    for i in range(iter):
-        psi_new = forte.apply_op(ham_op, psi_old)
-        energy = forte.overlap(psi_old, psi_new)
-        print(f"Iteration {i+1}: Energy = {energy}")
-        psi_old = forte.normalize(psi_new)
 
 
 class SparseBase:
@@ -152,23 +143,108 @@ class SparseCI(SparseBase):
         mo_space["virt"] = slice(nfrzn + ncas, mf.mol.nao)
         return mo_space
 
-    def make_hamiltonian_matrix(self):
-        ndets = len(self.dets)
-        self.hmat = np.zeros((ndets, ndets), dtype=np.complex128)
+    def make_hamiltonian_matrix(self, dets):
+        ndets = len(dets)
+        hmat = np.zeros((ndets, ndets), dtype=np.complex128)
         for i in range(ndets):
-            idet = forte.SparseState({self.dets[i]: 1.0})
+            idet = forte.SparseState({dets[i]: 1.0})
             h_idet = forte.apply_op(self.ham_op, idet)
             for j in range(i, ndets):
-                jdet = forte.SparseState({self.dets[j]: 1.0})
-                self.hmat[i, j] = forte.overlap(jdet, h_idet)
-                self.hmat[j, i] = self.hmat[i, j]
+                jdet = forte.SparseState({dets[j]: 1.0})
+                hmat[i, j] = forte.overlap(jdet, h_idet)
+                hmat[j, i] = hmat[i, j]
+        return hmat
 
-    def kernel(self):
-        self.dets = forte.hilbert_space(
-            self.nmo, self.nael, self.nbel, self.nirrep, self.orbsym, self.root_sym
+    def davidson(self, psi_0, maxiter):
+        psi_old = psi_0
+        for i in range(iter):
+            psi_new = forte.apply_op(self.ham_op, psi_old)
+            energy = forte.overlap(psi_old, psi_new)
+            print(f"Iteration {i+1}: Energy = {energy}")
+            psi_old = forte.normalize(psi_new)
+
+    def compute_preconditioner(self, dets, maxspace=100):
+        if self.verbose >= DEBUG_PRINT_LEVEL:
+            print("Computing preconditioner")
+        ndets = len(dets)
+        precond = np.ones(ndets, dtype=np.complex128)
+        for i in range(maxspace):
+            idet = forte.SparseState({dets[i]: 1.0})
+            h_idet = forte.apply_op(self.ham_op, idet)
+            precond[i] = forte.overlap(idet, h_idet)
+        if self.verbose >= DEBUG_PRINT_LEVEL:
+            print("Preconditioner computed")
+        return precond
+
+    def guess_x0(self, dim, nroots, method="cisd"):
+        assert method in ["eye", "cis", "cisd"], "Invalid guess method"
+        x0 = np.zeros((nroots, dim))
+        if method == "eye":
+            x0[:nroots, :nroots] = np.eye(nroots)
+        elif method == "cis":
+            _, c = self.kernel_cin(truncation=1)
+            x0[:nroots, : c.shape[0]] = c[:, :nroots].T
+        elif method == "cisd":
+            _, c = self.kernel_cin(truncation=2)
+            x0[:nroots, : c.shape[0]] = c[:, :nroots].T
+        return x0
+
+    def kernel_cin(self, truncation=2):
+        cin_dets = sorted(
+            forte.hilbert_space(
+                self.nmo,
+                self.nael,
+                self.nbel,
+                self.nirrep,
+                self.orbsym,
+                self.root_sym,
+                truncation=truncation,
+            )
         )
-        self.make_hamiltonian_matrix()
-        self.eigvals, self.eigvecs = np.linalg.eigh(self.hmat)
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print(f"Number of determinants: {len(cin_dets)}")
+        hmat = self.make_hamiltonian_matrix(cin_dets)
+        evals, evecs = np.linalg.eigh(hmat)
+        return evals, evecs
+
+    def kernel(self, solver, **davidson_kwargs):
+        if solver not in ["eigh", "davidson"]:
+            raise RuntimeError("Invalid solver")
+
+        ci_dets = sorted(
+            forte.hilbert_space(
+                self.nmo, self.nael, self.nbel, self.nirrep, self.orbsym, self.root_sym
+            )
+        )
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print(f"Number of determinants: {len(ci_dets)}")
+
+        if solver == "eigh":
+            hmat = self.make_hamiltonian_matrix(ci_dets)
+            eigvals, eigvecs = np.linalg.eigh(hmat)
+        elif solver == "davidson":
+            ndets = len(ci_dets)
+            precond_dim = min(davidson_kwargs.get("precond_dim", 100), ndets)
+            davidson_kwargs.pop("precond_dim", None)
+            precond = self.compute_preconditioner(ci_dets, maxspace=precond_dim).real
+            # prec = lambda dx, e, x0: dx/(precond-e)
+            guess_method = davidson_kwargs.get("guess_method", "cisd")
+            davidson_kwargs.pop("guess_method", None)
+            x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method)
+
+            def aop(xs):
+                xc = np.zeros_like(xs, dtype=np.complex128)
+                for idx, x in enumerate(xs):
+                    xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
+                    x1 = forte.apply_op(self.ham_op, xstate)
+                    for i in range(ndets):
+                        xc[idx, i] = x1[ci_dets[i]]
+                return xc
+
+            conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
+            if not conv:
+                raise RuntimeError("Davidson iterations did not converge")
+        return eigvals, eigvecs
 
 
 class SparseCC(SparseBase):
