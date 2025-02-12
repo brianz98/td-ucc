@@ -5,7 +5,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from sparse_cc import *
 
 
-def test_h2o_eom_2p3h():
+def test_h2o_eom_ea_2h3p_ccsd():
     mol = pyscf.gto.M(
         atom="""
     O
@@ -29,4 +29,4 @@ def test_h2o_eom_2p3h():
 
 
 if __name__ == "__main__":
-    test_h2o_eom_2p3h()
+    test_h2o_eom_ea_2h3p_ccsd()
