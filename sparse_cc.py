@@ -206,9 +206,35 @@ class SparseCC(SparseBase):
                 maxk=exp_max_k, screen_thresh=exp_screen_thresh
             )
         if self.unitary:
-            self.exp_apply_op = self.exp_op.apply_antiherm
+            if self.factorized:
+                self.apply_exp_op = functools.partial(
+                    self.exp_op.apply_antiherm, inverse=False
+                )
+                self.apply_exp_op_inv = functools.partial(
+                    self.exp_op.apply_antiherm, inverse=True
+                )
+            else:
+                self.apply_exp_op = functools.partial(
+                    self.exp_op.apply_antiherm, scaling_factor=1.0
+                )
+                self.apply_exp_op_inv = functools.partial(
+                    self.exp_op.apply_antiherm, scaling_factor=-1.0
+                )
         else:
-            self.exp_apply_op = self.exp_op.apply_op
+            if self.factorized:
+                self.apply_exp_op = functools.partial(
+                    self.exp_op.apply_op, inverse=False
+                )
+                self.apply_exp_op_inv = functools.partial(
+                    self.exp_op.apply_op, inverse=True
+                )
+            else:
+                self.apply_exp_op = functools.partial(
+                    self.exp_op.apply_op, scaling_factor=1.0
+                )
+                self.apply_exp_op_inv = functools.partial(
+                    self.exp_op.apply_op, scaling_factor=-1.0
+                )
 
         if self.nael != self.nbel:
             raise RuntimeError(
@@ -299,19 +325,13 @@ class SparseCC(SparseBase):
 
     def cc_residual_equations(self):
         # Step 1. Compute exp(T)|Phi>
-        if self.factorized:
-            wfn = self.exp_apply_op(self.op, self.ref, inverse=False)
-        else:
-            wfn = self.exp_apply_op(self.op, self.ref, scaling_factor=1.0)
+        wfn = self.apply_exp_op(self.op, self.ref)
 
         # Step 2. Compute H exp(T)|Phi>
         Hwfn = forte.apply_op(self.ham_op, wfn, screen_thresh=self.ham_screen_thresh)
 
         # Step 3. Compute exp(-T) H exp(T)|Phi>
-        if self.factorized:
-            R = self.exp_apply_op(self.op, Hwfn, inverse=True)
-        else:
-            R = self.exp_apply_op(self.op, Hwfn, scaling_factor=-1.0)
+        R = self.apply_exp_op_inv(self.op, Hwfn)
 
         # Step 4. Project residual onto excited determinants
         self.residual = forte.get_projection(self.op, self.ref, R)
@@ -405,11 +425,11 @@ class SparseCC(SparseBase):
             u_nu.add(op_nu[0], op_nu[1])
 
             if nu == len(self.op) - 1:
-                u_psi = self.exp_apply_op(u_nu, self.ref, inverse=False)
+                u_psi = self.apply_exp_op(u_nu, self.ref, inverse=False)
             else:
-                u_psi = self.exp_apply_op(u_nu, u_psi, inverse=False)
+                u_psi = self.apply_exp_op(u_nu, u_psi, inverse=False)
             k_u_psi = forte.apply_op(kappa_nu, u_psi)
-            u_k_u_psi = self.exp_apply_op(u_nu, k_u_psi, inverse=True)
+            u_k_u_psi = self.apply_exp_op_inv(u_nu, k_u_psi, inverse=True)
             grad[:, nu] = forte.get_projection(self.op, self.ref, u_k_u_psi)
         return grad
 
@@ -522,48 +542,27 @@ class SparseCC(SparseBase):
                                     states.append(forte.SparseState({d: 1.0}))
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of {nhole}h{npart}p EOM states: {len(states)}")
-        s2 = forte.s2_matrix(dets).nph
+        s2 = np.real(forte.s2_matrix(dets).nph)
         return states, s2
 
     def make_hbar(self, dets):
         H = np.zeros((len(dets), len(dets)), dtype=np.complex128)
 
-        if self.unitary:
-            _wfn_list = []
-            _Hwfn_list = []
+        for j in range(len(dets)):
+            # exp(S)|j>
+            wfn = self.apply_exp_op(self.op, dets[j])
+            # H exp(S)|j>
+            Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
+            # exp(-S) H exp(S)|j>
+            R = self.apply_exp_op_inv(self.op, Hwfn)
 
-            for i in range(len(dets)):
-                wfn = self.exp_apply_op(
-                    self.op,
-                    dets[i],
-                    scaling_factor=1.0,
-                )
-                Hwfn = forte.apply_op(self.ham_op, wfn)
-                _wfn_list.append(wfn)
-                _Hwfn_list.append(Hwfn)
-
-            for i in range(len(dets)):
-                for j in range(len(dets)):
-                    H[i, j] = forte.overlap(_wfn_list[i], _Hwfn_list[j])
+            # <i|exp(-S) H exp(S)|j>
+            if self.unitary:
+                for i in range(j, len(dets)):
+                    H[i, j] = forte.overlap(dets[i], R)
                     H[j, i] = H[i, j]
-        else:
-            for j in range(len(dets)):
-                # exp(S)|j>
-                wfn = self.exp_apply_op(
-                    self.op,
-                    dets[j],
-                    scaling_factor=1.0,
-                )
-                # H exp(S)|j>
-                Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
-                # exp(-S) H exp(S)|j>
-                R = self.exp_apply_op(
-                    self.op,
-                    Hwfn,
-                    scaling_factor=-1.0,
-                )
+            else:
                 for i in range(len(dets)):
-                    # <i|exp(-S) H exp(S)|j>
                     H[i, j] = forte.overlap(dets[i], R)
 
         return H
@@ -596,11 +595,10 @@ class SparseCC(SparseBase):
             print(f"{'#':^4} {'E_exc / Eh':^25} {'<S^2>':^10}  {'S':^5}")
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
             for i in range(len(self.eom_eigval)):
-                s2_val = (self.eom_eigvec[:, i].T @ self.s2 @ self.eom_eigvec[:, i])[0]
-                s = round(2 * (-1 + np.sqrt(1 + 4 * s2_val)))
-                s /= 4
+                s2 = (self.eom_eigvec[:, i].T @ self.s2 @ self.eom_eigvec[:, i])[0].real
+                s = round(2 * (-1 + np.sqrt(1 + 4 * s2))) / 4
                 print(
-                    f"{i:^4d} {self.eom_eigval[i]:^25.12f} {abs(s2_val):^10.3f} {abs(s):^5.1f}"
+                    f"{i:^4d} {self.eom_eigval[i]:^25.12f} {abs(s2):^10.3f} {abs(s):^5.1f}"
                 )
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
 
