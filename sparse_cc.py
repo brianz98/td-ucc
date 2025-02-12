@@ -474,7 +474,7 @@ class SparseCC(SparseBase):
             print(f" CC energy:             {self.energy:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
-    def make_eom_basis(self, nhole, npart, ms2=0):
+    def make_eom_basis(self, nhole, npart, ms2=0, first=False):
         states = []
         dets = []
 
@@ -486,12 +486,15 @@ class SparseCC(SparseBase):
             for i in range(nhole + 1):
                 hp.append((i, i + npart - nhole))
 
+        if not first and nhole == npart:
+            hp.remove((0, 0))
+
         for h, p in hp:
             for ah in range(h + 1):
                 bh = h - ah
                 for ap in range(p + 1):
                     bp = p - ap
-                    if (ah-ap) - (bh-bp) != ms2:
+                    if (ah - ap) - (bh - bp) != ms2:
                         continue
                     for ao in itertools.combinations(self.occ, self.nael - ah):
                         ao_sym = sym_dir_prod(self.orbsym[list(ao)])
@@ -501,11 +504,11 @@ class SparseCC(SparseBase):
                                 bo_sym = sym_dir_prod(self.orbsym[list(bo)])
                                 for bv in itertools.combinations(self.vir, bp):
                                     bv_sym = sym_dir_prod(self.orbsym[list(bv)])
-                                    if (
-                                        ao_sym ^ av_sym ^ bo_sym ^ bv_sym
-                                        != self.root_sym
-                                    ):
-                                        continue
+                                    # if (
+                                    #     ao_sym ^ av_sym ^ bo_sym ^ bv_sym
+                                    #     != self.root_sym
+                                    # ):
+                                    # continue
                                     d = forte.Determinant()
                                     for i in ao:
                                         d.set_alfa_bit(i, True)
@@ -519,7 +522,6 @@ class SparseCC(SparseBase):
                                     states.append(forte.SparseState({d: 1.0}))
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of {nhole}h{npart}p EOM states: {len(states)}")
-        print(states)
         s2 = forte.s2_matrix(dets).nph
         return states, s2
 
@@ -560,49 +562,45 @@ class SparseCC(SparseBase):
                     Hwfn,
                     scaling_factor=-1.0,
                 )
-                for i in range(j, len(dets)):
+                for i in range(len(dets)):
                     # <i|exp(-S) H exp(S)|j>
                     H[i, j] = forte.overlap(dets[i], R)
-                    H[j, i] = H[i, j]
 
         return H
 
-    def run_eom(self, nhole, npart, ms2, print_eigvals=True):
+    def run_eom(self, nhole, npart, ms2, print_eigvals=True, first=False):
         if self.unitary:
 
             def _eig(H):
                 eigval, eigvec = np.linalg.eigh(H)
-                eigval -= eigval[0]
-                eigval_argsort = np.array(range(len(eigval)))
-                return eigval, eigvec, eigval_argsort
+                eigval -= self.energy
+                return eigval, eigvec
 
         else:
 
             def _eig(H):
                 eigval, eigvec = scipy.linalg.eig(H)
                 eigval_argsort = np.argsort(np.real(eigval))
-                eigval -= eigval[eigval_argsort[0]]
+                eigval = eigval[eigval_argsort]
+                eigvec = eigvec[:, eigval_argsort]
+                eigval -= self.energy
                 eigval = np.real(eigval)
-                return eigval, eigvec, eigval_argsort
+                return eigval, eigvec
 
-        self.eom_basis, self.s2 = self.make_eom_basis(nhole, npart, ms2)
+        self.eom_basis, self.s2 = self.make_eom_basis(nhole, npart, ms2, first=first)
         self.eom_hbar = self.make_hbar(self.eom_basis)
-        self.eom_eigval, self.eom_eigvec, self.eom_eigval_argsort = _eig(self.eom_hbar)
+        self.eom_eigval, self.eom_eigvec = _eig(self.eom_hbar)
 
         if print_eigvals:
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
             print(f"{'#':^4} {'E_exc / Eh':^25} {'<S^2>':^10}  {'S':^5}")
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
-            for i in range(1, len(self.eom_eigval)):
-                s2_val = (
-                    self.eom_eigvec[:, self.eom_eigval_argsort[i]].T
-                    @ self.s2
-                    @ self.eom_eigvec[:, self.eom_eigval_argsort[i]]
-                )[0]
+            for i in range(len(self.eom_eigval)):
+                s2_val = (self.eom_eigvec[:, i].T @ self.s2 @ self.eom_eigvec[:, i])[0]
                 s = round(2 * (-1 + np.sqrt(1 + 4 * s2_val)))
                 s /= 4
                 print(
-                    f"{i:^4d} {self.eom_eigval[self.eom_eigval_argsort[i]]:^25.12f} {abs(s2_val):^10.3f} {abs(s):^5.1f}"
+                    f"{i:^4d} {self.eom_eigval[i]:^25.12f} {abs(s2_val):^10.3f} {abs(s):^5.1f}"
                 )
             print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
 
