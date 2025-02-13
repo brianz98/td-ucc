@@ -6,12 +6,12 @@ import forte, forte.utils
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
 from pyscf.lib.linalg_helper import davidson1
 from collections import deque
-import scipy, scipy.linalg
+import scipy, scipy.linalg, scipy.constants
 
+EH_TO_EV = scipy.constants.value("Hartree energy in eV")
 MINIMAL_PRINT_LEVEL = 1
 NORMAL_PRINT_LEVEL = 2
 DEBUG_PRINT_LEVEL = 3
-
 NIRREP = {"c1": 1, "cs": 2, "ci": 2, "c2": 2, "c2v": 4, "c2h": 4, "d2": 4, "d2h": 8}
 
 
@@ -70,6 +70,7 @@ class SparseBase:
             print(f"Reference determinant:     {self.hfref.str(self.nmo)}")
 
         self.make_hamiltonian()
+        self.make_s2_operator()
 
         self.ref = forte.SparseState({self.hfref: 1.0})
         eref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
@@ -110,6 +111,17 @@ class SparseBase:
         self.ham_op = forte.sparse_operator_hamiltonian(
             scalar, oei_a, oei_a, tei_aa, tei_ab, tei_aa
         )
+
+    def make_s2_operator(self):
+        sup = forte.SparseOperator()
+        sdn = forte.SparseOperator()
+        sz = forte.SparseOperator()
+        for i in range(self.nmo):
+            sup.add(f"{i}a+ {i}b-", 1.0)
+            sdn.add(f"{i}b+ {i}a-", 1.0)
+            sz.add(f"{i}a+ {i}a-", 0.5)
+            sz.add(f"{i}b+ {i}b-", -0.5)
+        self.s2_op = sup @ sdn + sz @ sz - sz
 
     get_mo_space = NotImplemented
 
@@ -572,7 +584,6 @@ class SparseCC(SparseBase):
 
     def make_eom_basis(self, nhole, npart, ms2=0, first=False):
         states = []
-        dets = []
 
         hp = []
         if nhole >= npart:
@@ -614,19 +625,18 @@ class SparseCC(SparseBase):
                                         d.set_beta_bit(i, True)
                                     for i in bv:
                                         d.set_beta_bit(i, True)
-                                    dets.append(d)
-                                    states.append(forte.SparseState({d: 1.0}))
+                                    states.append(d)
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of {nhole}h{npart}p EOM states: {len(states)}")
-        s2 = np.real(forte.s2_matrix(dets).nph)
-        return states, s2
+        return sorted(states)
 
-    def make_hbar(self, dets):
-        H = np.zeros((len(dets), len(dets)), dtype=np.complex128)
+    def make_hbar_eom(self, basis):
+        H = np.zeros((len(basis), len(basis)), dtype=np.complex128)
+        basis_states = [forte.SparseState({d: 1.0}) for d in basis]
 
-        for j in range(len(dets)):
+        for j in range(len(basis)):
             # exp(S)|j>
-            wfn = self.apply_exp_op(self.op, dets[j])
+            wfn = self.apply_exp_op(self.op, basis_states[j])
             # H exp(S)|j>
             Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
             # exp(-S) H exp(S)|j>
@@ -634,49 +644,121 @@ class SparseCC(SparseBase):
 
             # <i|exp(-S) H exp(S)|j>
             if self.unitary:
-                for i in range(j, len(dets)):
-                    H[i, j] = forte.overlap(dets[i], R)
+                for i in range(j, len(basis_states)):
+                    H[i, j] = forte.overlap(basis_states[i], R)
                     H[j, i] = H[i, j]
             else:
-                for i in range(len(dets)):
-                    H[i, j] = forte.overlap(dets[i], R)
+                for i in range(len(basis_states)):
+                    H[i, j] = forte.overlap(basis_states[i], R)
 
         return H
 
-    def run_eom(self, nhole, npart, ms2, print_eigvals=True, first=False):
+    def eom_eig(self, basis):
+        hbar = self.make_hbar_eom(basis)
+
         if self.unitary:
-
-            def _eig(H):
-                eigval, eigvec = np.linalg.eigh(H)
-                eigval -= self.energy
-                return eigval, eigvec
-
+            eigval, eigvec = np.linalg.eigh(hbar)
         else:
+            eigval, eigvec = scipy.linalg.eig(hbar)
+            eigval_argsort = np.argsort(np.real(eigval))
+            eigval = eigval[eigval_argsort]
+            eigvec = eigvec[:, eigval_argsort]
+            eigval = np.real(eigval)
+        return eigval, eigvec
 
-            def _eig(H):
-                eigval, eigvec = scipy.linalg.eig(H)
-                eigval_argsort = np.argsort(np.real(eigval))
-                eigval = eigval[eigval_argsort]
-                eigvec = eigvec[:, eigval_argsort]
-                eigval -= self.energy
-                eigval = np.real(eigval)
-                return eigval, eigvec
+    def guess_x0(self, dim, nroots, method="cisd"):
+        assert method in ["eye"], "Invalid guess method"
+        x0 = np.zeros((nroots, dim))
+        if method == "eye":
+            x0[:nroots, :nroots] = np.eye(nroots)
+        # elif method == "cis":
+        #     _, c = self.kernel_cin(truncation=1)
+        #     x0[:nroots, : c.shape[0]] = c[:, :nroots].T
+        # elif method == "cisd":
+        #     _, c = self.kernel_cin(truncation=2)
+        #     x0[:nroots, : c.shape[0]] = c[:, :nroots].T
+        return x0
 
-        self.eom_basis, self.s2 = self.make_eom_basis(nhole, npart, ms2, first=first)
-        self.eom_hbar = self.make_hbar(self.eom_basis)
-        self.eom_eigval, self.eom_eigvec = _eig(self.eom_hbar)
+    def compute_preconditioner(self, basis, maxspace=100):
+        if self.verbose >= DEBUG_PRINT_LEVEL:
+            print("Computing preconditioner")
+        nbasis = len(basis)
+        precond = np.ones(nbasis, dtype=np.complex128)
+        for i in range(maxspace):
+            idet = forte.SparseState({basis[i]: 1.0})
+            ui = self.apply_exp_op(self.op, idet)
+            hui = forte.apply_op(self.ham_op, ui)
+            uhui = self.apply_exp_op_inv(self.op, hui)
+            precond[i] = forte.overlap(idet, uhui)
+        if self.verbose >= DEBUG_PRINT_LEVEL:
+            print("Preconditioner computed")
+        return precond
 
+    def eom_davidson(self, basis, **davidson_kwargs):
+        nbasis = len(basis)
+        precond_dim = min(davidson_kwargs.get("precond_dim", 100), nbasis)
+        davidson_kwargs.pop("precond_dim", None)
+        precond = self.compute_preconditioner(basis, maxspace=precond_dim).real
+        guess_method = davidson_kwargs.get("guess_method", "cisd")
+        davidson_kwargs.pop("guess_method", None)
+        x0 = self.guess_x0(nbasis, davidson_kwargs.get("nroots", 5), guess_method)
+
+        def aop(xs):
+            xc = np.zeros_like(xs, dtype=np.complex128)
+            for idx, x in enumerate(xs):
+                xstate = forte.SparseState({d: c for d, c in zip(basis, x)})
+                ux = self.apply_exp_op(self.op, xstate)
+                hux = forte.apply_op(self.ham_op, ux)
+                uhux = self.apply_exp_op_inv(self.op, hux)
+                for i in range(nbasis):
+                    xc[idx, i] = uhux[basis[i]]
+            return xc
+
+        conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
+        if not all(conv):
+            raise RuntimeError("Davidson iterations did not converge")
+        return eigvals, eigvecs
+
+    def get_s2(self, state):
+        return forte.overlap(state, forte.apply_op(self.s2_op, state)).real
+
+    def run_eom(
+        self,
+        nhole,
+        npart,
+        ms2,
+        print_eigvals=True,
+        first=False,
+        solver="eig",
+        **davidson_kwargs,
+    ):
+        nroots = davidson_kwargs.get("nroots", 5)
+        assert solver in ["eig", "davidson"], "Invalid EOM solver"
+        eom_basis = self.make_eom_basis(nhole, npart, ms2, first=first)
+        if solver == "eig":
+            eom_eigval, eom_eigvec = self.eom_eig(eom_basis)
+            eom_eigval = eom_eigval[:nroots]
+            eom_eigvec = eom_eigvec[:, :nroots].T
+        elif solver == "davidson":
+            eom_eigval, eom_eigvec = self.eom_davidson(eom_basis, **davidson_kwargs)
+            nroots = len(eom_eigval)
         if print_eigvals:
-            print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
-            print(f"{'#':^4} {'E_exc / Eh':^25} {'<S^2>':^10}  {'S':^5}")
-            print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
-            for i in range(len(self.eom_eigval)):
-                s2 = (self.eom_eigvec[:, i].T @ self.s2 @ self.eom_eigvec[:, i])[0].real
-                s = round(2 * (-1 + np.sqrt(1 + 4 * s2))) / 4
-                print(
-                    f"{i:^4d} {self.eom_eigval[i]:^25.12f} {abs(s2):^10.3f} {abs(s):^5.1f}"
+            print("=" * 78)
+            print(
+                f"{'Root':^4} {'E / Eh':^20} {'ω / Eh':^20} {'ω / eV':^20} {'<S^2>':^10}"
+            )
+            print("-" * 78)
+            for i in range(nroots):
+                s2 = self.get_s2(
+                    forte.SparseState(
+                        {d: c for d, c in zip(eom_basis, eom_eigvec[i])}
+                    )
                 )
-            print(f"{'='*4:^4}={'='*25:^25}={'='*10:^10}={'='*5:^5}")
+                print(
+                    f"{i:^4d} {eom_eigval[i]:^20.12f} {eom_eigval[i] - self.energy:^20.12f} {(eom_eigval[i] - self.energy) * EH_TO_EV:^20.12f} {s2:^10.3f}"
+                )
+            print("=" * 78)
+        return eom_eigval, eom_eigvec
 
 
 class DIIS:

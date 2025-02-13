@@ -20,12 +20,12 @@ def test_h2o_eom_ccsdtq():
 
     sparse_cc.make_cluster_operator(max_exc=4, pp=False)
     sparse_cc.kernel()
-    sparse_cc.run_eom(nhole=4, npart=4, ms2=0, print_eigvals=True)
-    assert np.isclose(sparse_cc.eom_eigval[0], 0.273489391393, atol=1e-8)
-    assert np.isclose(sparse_cc.eom_eigval[1], 0.320716367276, atol=1e-8)
-    assert np.isclose(sparse_cc.eom_eigval[2], 0.356073574550, atol=1e-8)
-    assert np.isclose(sparse_cc.eom_eigval[3], 0.363868969265, atol=1e-8)
-    assert np.isclose(sparse_cc.eom_eigval[4], 0.390243577551, atol=1e-8)
+    e, _ = sparse_cc.run_eom(nhole=4, npart=4, ms2=0, print_eigvals=True)
+    assert np.isclose(e[0] - sparse_cc.energy, 0.273489391393, atol=1e-8)
+    assert np.isclose(e[1] - sparse_cc.energy, 0.320716367276, atol=1e-8)
+    assert np.isclose(e[2] - sparse_cc.energy, 0.356073574550, atol=1e-8)
+    assert np.isclose(e[3] - sparse_cc.energy, 0.363868969265, atol=1e-8)
+    assert np.isclose(e[4] - sparse_cc.energy, 0.390243577551, atol=1e-8)
 
 
 if __name__ == "__main__":

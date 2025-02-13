@@ -7,7 +7,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from sparse_cc import *
 
 
-def test_n2_casci66():
+def test_n2_casci66_davidson():
     mol = pyscf.gto.M(
         atom="""
     N
@@ -18,9 +18,9 @@ def test_n2_casci66():
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
     ci = SparseCI(mf, 6, 6, verbose=5)
-    e, _ = ci.kernel(solver="eigh")
+    e, _ = ci.kernel(solver="davidson", nroots=1)
     assert np.isclose(e[0], -108.94701069, atol=1e-8)
 
 
 if __name__ == "__main__":
-    test_n2_casci66()
+    test_n2_casci66_davidson()
