@@ -69,7 +69,7 @@ class SparseBase:
             print(f"Number of beta electrons:  {self.nbel}")
             print(f"Reference determinant:     {self.hfref.str(self.nmo)}")
 
-        self.make_hamiltonian()
+        self.make_hamiltonian_operator()
         self.make_s2_operator()
 
         self.ref = forte.SparseState({self.hfref: 1.0})
@@ -78,7 +78,7 @@ class SparseBase:
             eref, mf.e_tot
         ), f"Reference energy mismatch: {eref} != {mf.e_tot}"
 
-    def make_hamiltonian(self):
+    def make_hamiltonian_operator(self):
         scalar = self.mol.energy_nuc()
         hcore = np.einsum(
             "pi,qj,pq->ij", self.mf.mo_coeff, self.mf.mo_coeff, self.mf.get_hcore()
@@ -122,6 +122,39 @@ class SparseBase:
             sz.add(f"{i}a+ {i}a-", 0.5)
             sz.add(f"{i}b+ {i}b-", -0.5)
         self.s2_op = sup @ sdn + sz @ sz - sz
+
+    def make_dipole_operator(self):
+        nucl_dip = np.einsum("i,ix->x", self.mol.atom_charges(), self.mol.atom_coords())
+        mo_dip = np.einsum(
+            "pi,qj,xpq->xij",
+            self.mf.mo_coeff,
+            self.mf.mo_coeff,
+            self.mol.intor_symmetric("int1e_r"),
+        )
+        if self.nfrzn > 0:
+            nucl_dip += 2 * np.einsum("xii->x", mo_dip[:, self.frzn, self.frzn])
+            mo_dip = mo_dip[:, self.corr, self.corr]
+        self.dip_x_op = forte.SparseOperator()
+        self.dip_y_op = forte.SparseOperator()
+        self.dip_z_op = forte.SparseOperator()
+        self.dip_x_op.add("[]", nucl_dip[0])
+        self.dip_y_op.add("[]", nucl_dip[1])
+        self.dip_z_op.add("[]", nucl_dip[2])
+        for i in range(self.nmo):
+            for j in range(self.nmo):
+                self.dip_x_op.add(f"{j}a+ {i}a-", -mo_dip[0, i, j])
+                self.dip_x_op.add(f"{j}b+ {i}b-", -mo_dip[0, i, j])
+                self.dip_y_op.add(f"{j}a+ {i}a-", -mo_dip[1, i, j])
+                self.dip_y_op.add(f"{j}b+ {i}b-", -mo_dip[1, i, j])
+                self.dip_z_op.add(f"{j}a+ {i}a-", -mo_dip[2, i, j])
+                self.dip_z_op.add(f"{j}b+ {i}b-", -mo_dip[2, i, j])
+
+    def evaluate_td_pert(self, fieldfunc, t):
+        field = fieldfunc(t)
+        dip_x_op_t = -field[0] * self.dip_x_op
+        dip_y_op_t = -field[1] * self.dip_y_op
+        dip_z_op_t = -field[2] * self.dip_z_op
+        return dip_x_op_t, dip_y_op_t, dip_z_op_t
 
     get_mo_space = NotImplemented
 
@@ -532,6 +565,60 @@ class SparseCC(SparseBase):
         # push new amplitudes to the T operator
         self.op.set_coefficients(t)
 
+    def update_amps_real_time(self, dt):
+        t = self.op.coefficients()
+        grad = self.evaluate_grad_ovlp()
+        delta = (0 + 1j) * np.linalg.solve(grad, self.residual)
+        # update the amplitudes
+        for i in range(len(self.op)):
+            t[i] -= delta[i] * dt
+        # push new amplitudes to the T operator
+        self.op.set_coefficients(t)
+
+    def real_time_propagation(self, nsteps, dt=0.005, **kwargs):
+        start = time.time()
+
+        # initialize T = 0
+        t = [0.0] * len(self.op)
+        self.op.set_coefficients(t)
+
+        # initalize E = 0
+        old_e = 0.0
+
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=" * 80)
+            print(
+                f"{'Iter':^5} {'Energy':^20} {'Delta Energy':^20} {'Imag Time':^15} {'Time':^15}"
+            )
+            print("-" * 80)
+
+        for iter in range(nsteps):
+            iterstart = time.time()
+            # 1. evaluate the CC residual equations
+            self.cc_residual_equations()
+
+            # 2. update the CC equations
+            self.update_amps_imag_time(dt)
+
+            iterend = time.time()
+
+            # 3. print information
+            if self.verbose >= NORMAL_PRINT_LEVEL:
+                print(
+                    f"{iter:<5d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iter*dt:<15.3f} {iterend-iterstart:<15.3f}"
+                )
+
+            old_e = self.energy
+
+        self.e_corr = self.energy - self.mf.e_tot
+        if self.verbose >= NORMAL_PRINT_LEVEL:
+            print("=" * 80)
+            print(f" Total time: {time.time()-start:11.3f} [s]")
+
+        if self.verbose >= MINIMAL_PRINT_LEVEL:
+            print(f" CC energy:             {self.energy:20.12f} [Eh]")
+            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
+
     def imag_time_relaxation(self, dt=0.005, **kwargs):
         e_conv = kwargs.get("e_conv", 1e-8)
         maxiter = kwargs.get("maxiter", 1000)
@@ -751,9 +838,7 @@ class SparseCC(SparseBase):
             print("-" * 78)
             for i in range(nroots):
                 s2 = self.get_s2(
-                    forte.SparseState(
-                        {d: c for d, c in zip(eom_basis, eom_eigvec[i])}
-                    )
+                    forte.SparseState({d: c for d, c in zip(eom_basis, eom_eigvec[i])})
                 )
                 print(
                     f"{i:^4d} {eom_eigval[i]:^20.12f} {eom_eigval[i] - self.energy:^20.12f} {(eom_eigval[i] - self.energy) * EH_TO_EV:^20.12f} {s2:^10.3f}"
