@@ -4,7 +4,7 @@ import time
 import numpy as np
 import forte, forte.utils
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
-from pyscf.lib.linalg_helper import davidson1
+from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
 from collections import deque
 import scipy, scipy.linalg, scipy.constants
 
@@ -207,10 +207,11 @@ class SparseCI(SparseBase):
                 self.nmo,
                 self.nael,
                 self.nbel,
+                self.hfref,
+                truncation,
                 self.nirrep,
                 self.orbsym,
                 self.root_sym,
-                truncation=truncation,
             )
         )
         if self.verbose >= NORMAL_PRINT_LEVEL:
@@ -254,7 +255,7 @@ class SparseCI(SparseBase):
                 return xc
 
             conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
-            if not conv:
+            if not all(conv):
                 raise RuntimeError("Davidson iterations did not converge")
         return eigvals, eigvecs
 
@@ -714,7 +715,7 @@ class SparseCC(SparseBase):
                     xc[idx, i] = uhux[basis[i]]
             return xc
 
-        conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
+        conv, eigvals, eigvecs = davidson_nosym1(aop, x0, precond, **davidson_kwargs)
         if not all(conv):
             raise RuntimeError("Davidson iterations did not converge")
         return eigvals, eigvecs
