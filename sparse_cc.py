@@ -73,10 +73,10 @@ class SparseBase:
         self.make_s2_operator()
 
         self.ref = forte.SparseState({self.hfref: 1.0})
-        eref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
+        self.e_ref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
         assert np.isclose(
-            eref, mf.e_tot
-        ), f"Reference energy mismatch: {eref} != {mf.e_tot}"
+            self.e_ref, mf.e_tot
+        ), f"Reference energy mismatch: {self.e_ref} != {mf.e_tot}"
 
     def make_hamiltonian_operator(self):
         scalar = self.mol.energy_nuc()
@@ -200,29 +200,37 @@ class SparseCI(SparseBase):
                 hmat[j, i] = hmat[i, j]
         return hmat
 
-    def davidson(self, psi_0, maxiter):
+    def power_method(self, psi_0, maxiter):
         psi_old = psi_0
-        for i in range(iter):
+        for i in range(maxiter):
             psi_new = forte.apply_op(self.ham_op, psi_old)
             energy = forte.overlap(psi_old, psi_new)
             print(f"Iteration {i+1}: Energy = {energy}")
             psi_old = forte.normalize(psi_new)
 
-    def compute_preconditioner(self, dets, maxspace=100):
+    def slater_condon_0(self, det):
+        exc = self.hfref.excitation_connection(det)
+        res = self.e_ref
+        res -= self.eps[exc[0]].sum() - self.eps[exc[1]].sum()
+        res -= self.eps[exc[1]].sum() - self.eps[exc[0]].sum()
+        return res
+
+    def compute_preconditioner(self, dets):
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print("Computing preconditioner")
         ndets = len(dets)
-        precond = np.ones(ndets, dtype=np.complex128)
-        for i in range(maxspace):
-            idet = forte.SparseState({dets[i]: 1.0})
-            h_idet = forte.apply_op(self.ham_op, idet)
-            precond[i] = forte.overlap(idet, h_idet)
+        precond = np.zeros(ndets, dtype=np.complex128)
+        for i in range(ndets):
+            # idet = forte.SparseState({dets[i]: 1.0})
+            # h_idet = forte.apply_op(self.ham_op, idet)
+            # precond[i] = forte.overlap(idet, h_idet)
+            precond[i] = self.slater_condon_0(dets[i])
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print("Preconditioner computed")
         return precond
 
-    def guess_x0(self, dim, nroots, method="cisd"):
-        assert method in ["eye", "cis", "cisd"], "Invalid guess method"
+    def guess_x0(self, dim, nroots, method="cisd", dets=None):
+        assert method in ["eye", "cis", "cisd", "pspace"], "Invalid guess method"
         x0 = np.zeros((nroots, dim))
         if method == "eye":
             x0[:nroots, :nroots] = np.eye(nroots)
@@ -232,8 +240,11 @@ class SparseCI(SparseBase):
         elif method == "cisd":
             _, c = self.kernel_cin(truncation=2)
             x0[:nroots, : c.shape[0]] = c[:, :nroots].T
+        elif method == "pspace":
+            _, c = self.kernel_gen_ci(dets)
+            x0[:nroots, : c.shape[0]] = c[:, :nroots].T
         return x0
-
+    
     def kernel_cin(self, truncation=2):
         cin_dets = sorted(
             forte.hilbert_space(
@@ -250,6 +261,11 @@ class SparseCI(SparseBase):
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of determinants: {len(cin_dets)}")
         hmat = self.make_hamiltonian_matrix(cin_dets)
+        evals, evecs = np.linalg.eigh(hmat)
+        return evals, evecs
+    
+    def kernel_gen_ci(self, dets):
+        hmat = self.make_hamiltonian_matrix(dets)
         evals, evecs = np.linalg.eigh(hmat)
         return evals, evecs
 
@@ -270,13 +286,20 @@ class SparseCI(SparseBase):
             eigvals, eigvecs = np.linalg.eigh(hmat)
         elif solver == "davidson":
             ndets = len(ci_dets)
-            precond_dim = min(davidson_kwargs.get("precond_dim", 100), ndets)
-            davidson_kwargs.pop("precond_dim", None)
-            precond = self.compute_preconditioner(ci_dets, maxspace=precond_dim).real
+            precond = self.compute_preconditioner(ci_dets).real
             # prec = lambda dx, e, x0: dx/(precond-e)
             guess_method = davidson_kwargs.get("guess_method", "cisd")
             davidson_kwargs.pop("guess_method", None)
-            x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method)
+            if guess_method == "pspace":
+                argsort = np.argsort(precond)
+                precond = precond[argsort]
+                pspace_dim = davidson_kwargs.get("pspace_dim", 100)
+                davidson_kwargs.pop("pspace_dim", None)
+                ci_dets = [ci_dets[i] for i in argsort]
+                pspace_dets = ci_dets[:pspace_dim]
+                x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method, dets=pspace_dets)
+            else:
+                x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method)
 
             def aop(xs):
                 xc = np.zeros_like(xs, dtype=np.complex128)

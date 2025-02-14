@@ -6,7 +6,6 @@ import pyscf.mcscf
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from sparse_cc import *
 
-@pytest.mark.skip(reason="This test is too long")
 def test_h2o_fci_davidson_fc():
     mol = pyscf.gto.M(
         atom="""
@@ -22,9 +21,9 @@ def test_h2o_fci_davidson_fc():
     e, _ = ci.kernel(
         nroots=1,
         solver="davidson",
-        guess_method="cisd",
+        guess_method="pspace",
+        pspace_dim=500,
         verbose=5,
-        precond_dim=1000,
         max_cycle=100,
         tol=1e-8,
     )
