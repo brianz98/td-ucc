@@ -179,10 +179,13 @@ class SparseCI(SparseBase):
         )
 
     def get_mo_space(self, mf, ncas, nelecas):
-        assert isinstance(nelecas, int), "nelecas must be an integer"
+        assert type(nelecas) in [int, tuple], "nelecas must be an integer or a tuple"
         mo_space = {}
         nelec = mf.mol.nelectron
-        nfrzn = (nelec - nelecas) // 2
+        if type(nelecas) == int:
+            nfrzn = (nelec - nelecas) // 2
+        else:
+            nfrzn = (nelec - sum(nelecas)) // 2
         mo_space["frzn"] = slice(0, nfrzn)
         mo_space["corr"] = slice(nfrzn, nfrzn + ncas)
         mo_space["virt"] = slice(nfrzn + ncas, mf.mol.nao)
@@ -282,14 +285,15 @@ class SparseCI(SparseBase):
         op_t = self.evaluate_td_pert(fieldfunc, t)
         return (-1j) * self.sigma_vector_build([psi], dets, self.ham_op + op_t)[0]
 
-    def kernel_tdci(self, psi_0, dets, fieldfunc, max_t):
+    def kernel_tdci(self, psi_0, dets, fieldfunc, max_t, **kwargs):
         gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
-        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
         while True:
             integrator.step()
             if integrator.status != "running":
                 break
             print(integrator.t)
+            print(integrator.y)
         if integrator.status == "failed":
             raise RuntimeError("Time propagation failed")
 
