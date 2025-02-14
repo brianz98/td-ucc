@@ -6,7 +6,7 @@ import forte, forte.utils
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
 from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
 from collections import deque
-import scipy, scipy.linalg, scipy.constants
+import scipy, scipy.linalg, scipy.constants, scipy.integrate
 
 EH_TO_EV = scipy.constants.value("Hartree energy in eV")
 MINIMAL_PRINT_LEVEL = 1
@@ -151,10 +151,10 @@ class SparseBase:
 
     def evaluate_td_pert(self, fieldfunc, t):
         field = fieldfunc(t)
-        dip_x_op_t = -field[0] * self.dip_x_op
-        dip_y_op_t = -field[1] * self.dip_y_op
-        dip_z_op_t = -field[2] * self.dip_z_op
-        return dip_x_op_t, dip_y_op_t, dip_z_op_t
+        td_pert = self.dip_x_op * (-field[0])
+        td_pert += self.dip_y_op * (-field[1])
+        td_pert += self.dip_z_op * (-field[2])
+        return td_pert
 
     get_mo_space = NotImplemented
 
@@ -221,9 +221,6 @@ class SparseCI(SparseBase):
         ndets = len(dets)
         precond = np.zeros(ndets, dtype=np.complex128)
         for i in range(ndets):
-            # idet = forte.SparseState({dets[i]: 1.0})
-            # h_idet = forte.apply_op(self.ham_op, idet)
-            # precond[i] = forte.overlap(idet, h_idet)
             precond[i] = self.slater_condon_0(dets[i])
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print("Preconditioner computed")
@@ -244,10 +241,19 @@ class SparseCI(SparseBase):
             _, c = self.kernel_gen_ci(dets)
             x0[:nroots, : c.shape[0]] = c[:, :nroots].T
         return x0
-    
-    def kernel_cin(self, truncation=2):
-        cin_dets = sorted(
-            forte.hilbert_space(
+
+    def enumerate_determinants(self, truncation):
+        if truncation == -1:
+            dets = forte.hilbert_space(
+                self.nmo,
+                self.nael,
+                self.nbel,
+                self.nirrep,
+                self.orbsym,
+                self.root_sym,
+            )
+        else:
+            dets = forte.hilbert_space(
                 self.nmo,
                 self.nael,
                 self.nbel,
@@ -257,27 +263,41 @@ class SparseCI(SparseBase):
                 self.orbsym,
                 self.root_sym,
             )
-        )
+        return sorted(dets)
+
+    def kernel_cin(self, truncation=2):
+        cin_dets = self.enumerate_determinants(truncation)
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of determinants: {len(cin_dets)}")
         hmat = self.make_hamiltonian_matrix(cin_dets)
         evals, evecs = np.linalg.eigh(hmat)
         return evals, evecs
-    
+
     def kernel_gen_ci(self, dets):
         hmat = self.make_hamiltonian_matrix(dets)
         evals, evecs = np.linalg.eigh(hmat)
         return evals, evecs
 
+    def evaluate_time_deriv(self, psi, dets, fieldfunc, t):
+        op_t = self.evaluate_td_pert(fieldfunc, t)
+        return (-1j) * self.sigma_vector_build([psi], dets, self.ham_op + op_t)[0]
+
+    def kernel_tdci(self, psi_0, dets, fieldfunc, max_t):
+        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t)
+        while True:
+            integrator.step()
+            if integrator.status != "running":
+                break
+            print(integrator.t)
+        if integrator.status == "failed":
+            raise RuntimeError("Time propagation failed")
+
     def kernel(self, solver, **davidson_kwargs):
         if solver not in ["eigh", "davidson"]:
             raise RuntimeError("Invalid solver")
 
-        ci_dets = sorted(
-            forte.hilbert_space(
-                self.nmo, self.nael, self.nbel, self.nirrep, self.orbsym, self.root_sym
-            )
-        )
+        ci_dets = self.enumerate_determinants(truncation=-1)
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of determinants: {len(ci_dets)}")
 
@@ -287,7 +307,6 @@ class SparseCI(SparseBase):
         elif solver == "davidson":
             ndets = len(ci_dets)
             precond = self.compute_preconditioner(ci_dets).real
-            # prec = lambda dx, e, x0: dx/(precond-e)
             guess_method = davidson_kwargs.get("guess_method", "cisd")
             davidson_kwargs.pop("guess_method", None)
             if guess_method == "pspace":
@@ -297,23 +316,33 @@ class SparseCI(SparseBase):
                 davidson_kwargs.pop("pspace_dim", None)
                 ci_dets = [ci_dets[i] for i in argsort]
                 pspace_dets = ci_dets[:pspace_dim]
-                x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method, dets=pspace_dets)
+                x0 = self.guess_x0(
+                    ndets,
+                    davidson_kwargs.get("nroots", 1),
+                    guess_method,
+                    dets=pspace_dets,
+                )
             else:
-                x0 = self.guess_x0(ndets, davidson_kwargs.get("nroots", 1), guess_method)
+                x0 = self.guess_x0(
+                    ndets, davidson_kwargs.get("nroots", 1), guess_method
+                )
 
-            def aop(xs):
-                xc = np.zeros_like(xs, dtype=np.complex128)
-                for idx, x in enumerate(xs):
-                    xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
-                    x1 = forte.apply_op(self.ham_op, xstate)
-                    for i in range(ndets):
-                        xc[idx, i] = x1[ci_dets[i]]
-                return xc
-
+            aop = lambda x: self.sigma_vector_build(x, ci_dets, self.ham_op)
             conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
             if not all(conv):
                 raise RuntimeError("Davidson iterations did not converge")
         return eigvals, eigvecs
+
+    @staticmethod
+    def sigma_vector_build(xs, ci_dets, op):
+        xc = np.zeros_like(xs, dtype=np.complex128)
+        ndets = len(ci_dets)
+        for idx, x in enumerate(xs):
+            xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
+            x1 = forte.apply_op(op, xstate)
+            for i in range(ndets):
+                xc[idx, i] = x1[ci_dets[i]]
+        return xc
 
 
 class SparseCC(SparseBase):
