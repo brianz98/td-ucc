@@ -7,6 +7,7 @@ import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
 from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
 from collections import deque
 import scipy, scipy.linalg, scipy.constants, scipy.integrate
+import math
 
 EH_TO_EV = scipy.constants.value("Hartree energy in eV")
 MINIMAL_PRINT_LEVEL = 1
@@ -156,7 +157,36 @@ class SparseBase:
         td_pert += self.dip_z_op * (-field[2])
         return td_pert
 
+    @staticmethod
+    def get_occ(psi, dets, orb):
+        nop = forte.SparseOperator()
+        nop.add(f"{orb}a+ {orb}a-", 1.0)
+        nop.add(f"{orb}b+ {orb}b-", 1.0)
+        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
+        return forte.overlap(state, nop @ state)
+
+    def get_dipole_z(self, psi, dets):
+        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
+        return forte.overlap(state, self.dip_z_op @ state)
+
+    def kernel_td(self, psi_0, dets, fieldfunc, max_t, propfunc, **kwargs):
+        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
+        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
+        i = 0
+        while True:
+            integrator.step()
+            if integrator.status != "running":
+                break
+            prop[i, 0] = integrator.t
+            prop[i, 1] = propfunc(integrator.y, dets)
+            i += 1
+        if integrator.status == "failed":
+            raise RuntimeError("Time propagation failed")
+        return prop[:i, :]
+
     get_mo_space = NotImplemented
+    evaluate_time_deriv = NotImplemented
 
 
 class SparseCI(SparseBase):
@@ -284,18 +314,6 @@ class SparseCI(SparseBase):
     def evaluate_time_deriv(self, psi, dets, fieldfunc, t):
         op_t = self.evaluate_td_pert(fieldfunc, t)
         return (-1j) * self.sigma_vector_build([psi], dets, self.ham_op + op_t)[0]
-
-    def kernel_tdci(self, psi_0, dets, fieldfunc, max_t, **kwargs):
-        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
-        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
-        while True:
-            integrator.step()
-            if integrator.status != "running":
-                break
-            print(integrator.t)
-            print(integrator.y)
-        if integrator.status == "failed":
-            raise RuntimeError("Time propagation failed")
 
     def kernel(self, solver, **davidson_kwargs):
         if solver not in ["eigh", "davidson"]:
