@@ -9,11 +9,11 @@ def test_ne_duccsdt_fc_pp():
     mol = pyscf.gto.M(atom="Ne", basis="cc-pvdz", symmetry="d2h")
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    sparse_cc = SparseCC(mf, verbose=5, cc_type="ducc", frozen_core=1)
+    cc = SparseCC(mf, verbose=5, cc_type="ducc", frozen_core=1)
 
-    sparse_cc.make_cluster_operator(max_exc=3, pp=True)
-    sparse_cc.kernel()
-    assert np.isclose(sparse_cc.energy, -128.678505307688, atol=1e-8)
+    cc.make_cluster_operator(max_exc=3, pp=True)
+    cc.kernel()
+    assert np.isclose(cc.e_cc, -128.678505307688, atol=1e-8)
 
 
 if __name__ == "__main__":

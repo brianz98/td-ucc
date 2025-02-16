@@ -49,7 +49,7 @@ class SparseBase:
         if self.point_group != "c1":
             self.orbsym = self.mf.mo_coeff.orbsym[self.corr]
         else:
-            self.orbsym = [0] * self.nmo
+            self.orbsym = np.zeros(self.nmo, dtype=int)
 
         self.nirrep = NIRREP[self.point_group]
         self.occ = list(range(self.nael))
@@ -157,36 +157,7 @@ class SparseBase:
         td_pert += self.dip_z_op * (-field[2])
         return td_pert
 
-    @staticmethod
-    def get_occ(psi, dets, orb):
-        nop = forte.SparseOperator()
-        nop.add(f"{orb}a+ {orb}a-", 1.0)
-        nop.add(f"{orb}b+ {orb}b-", 1.0)
-        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
-        return forte.overlap(state, nop @ state)
-
-    def get_dipole_z(self, psi, dets):
-        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
-        return forte.overlap(state, self.dip_z_op @ state)
-
-    def kernel_td(self, psi_0, dets, fieldfunc, max_t, propfunc, **kwargs):
-        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
-        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
-        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
-        i = 0
-        while True:
-            integrator.step()
-            if integrator.status != "running":
-                break
-            prop[i, 0] = integrator.t
-            prop[i, 1] = propfunc(integrator.y, dets)
-            i += 1
-        if integrator.status == "failed":
-            raise RuntimeError("Time propagation failed")
-        return prop[:i, :]
-
     get_mo_space = NotImplemented
-    evaluate_time_deriv = NotImplemented
 
 
 class SparseCI(SparseBase):
@@ -366,6 +337,34 @@ class SparseCI(SparseBase):
                 xc[idx, i] = x1[ci_dets[i]]
         return xc
 
+    @staticmethod
+    def get_occ(psi, dets, orb):
+        nop = forte.SparseOperator()
+        nop.add(f"{orb}a+ {orb}a-", 1.0)
+        nop.add(f"{orb}b+ {orb}b-", 1.0)
+        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
+        return forte.overlap(state, nop @ state)
+
+    def get_dipole_z(self, psi, dets):
+        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
+        return forte.overlap(state, self.dip_z_op @ state)
+
+    def kernel_td(self, psi_0, dets, fieldfunc, max_t, propfunc, **kwargs):
+        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
+        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
+        i = 0
+        while True:
+            integrator.step()
+            if integrator.status != "running":
+                break
+            prop[i, 0] = integrator.t
+            prop[i, 1] = propfunc(integrator.y, dets)
+            i += 1
+        if integrator.status == "failed":
+            raise RuntimeError("Time propagation failed")
+        return prop[:i, :]
+
 
 class SparseCC(SparseBase):
     def __init__(
@@ -519,38 +518,37 @@ class SparseCC(SparseBase):
             for sqop, c in self.op:
                 print(f"{sqop}")
 
-    def cc_residual_equations(self):
+    def cc_residual_equations(self, op, ham):
         # Step 1. Compute exp(T)|Phi>
-        wfn = self.apply_exp_op(self.op, self.ref)
+        wfn = self.apply_exp_op(op, self.ref)
 
         # Step 2. Compute H exp(T)|Phi>
-        Hwfn = forte.apply_op(self.ham_op, wfn, screen_thresh=self.ham_screen_thresh)
+        Hwfn = forte.apply_op(ham, wfn, screen_thresh=self.ham_screen_thresh)
 
         # Step 3. Compute exp(-T) H exp(T)|Phi>
-        R = self.apply_exp_op_inv(self.op, Hwfn)
+        R = self.apply_exp_op_inv(op, Hwfn)
 
         # Step 4. Project residual onto excited determinants
-        self.residual = forte.get_projection(self.op, self.ref, R)
+        residual = np.array(forte.get_projection(op, self.ref, R))
 
-        self.energy = 0.0
+        energy = 0.0
         for d, c in self.ref.items():
-            self.energy += c * R[d]
-        self.energy = self.energy.real
+            energy += c * R[d]
+        energy = energy.real
+        return residual, energy
 
-    def update_amps(self, diis):
-        t = self.op.coefficients()
+    def update_amps(self, tamps, diis):
         if diis.use_diis:
-            t_old = np.array(t).copy()
+            t_old = tamps.copy()
         # update the amplitudes
-        for i in range(len(self.op)):
-            t[i] += self.residual[i] / self.denominators[i]
+        tamps += self.residual / self.denominators
         # push new amplitudes to the T operator
         if diis.use_diis:
-            t_new = np.array(t).copy()
+            t_new = np.array(tamps).copy()
             diis.add_vector(t_new, t_new - t_old)
-            self.op.set_coefficients(diis.compute())
+            return diis.compute()
         else:
-            self.op.set_coefficients(t)
+            return tamps
 
     def kernel(self, **kwargs):
         e_conv = kwargs.get("e_conv", 1e-12)
@@ -563,8 +561,8 @@ class SparseCC(SparseBase):
         start = time.time()
 
         # initialize T = 0
-        t = [0.0] * len(self.op)
-        self.op.set_coefficients(t)
+        tamps = np.zeros(len(self.op), dtype=np.complex128)
+        self.op.set_coefficients(list(tamps))
 
         # initalize E = 0
         old_e = 0.0
@@ -577,34 +575,71 @@ class SparseCC(SparseBase):
         for iter in range(maxiter):
             iterstart = time.time()
             # 1. evaluate the CC residual equations
-            self.cc_residual_equations()
+            self.residual, self.e_cc = self.cc_residual_equations(self.op, self.ham_op)
 
             # 2. update the CC equations
-            self.update_amps(diis)
+            tamps = self.update_amps(tamps, diis)
+            self.op.set_coefficients(list(tamps))
 
             iterend = time.time()
 
             # 3. print information
             if self.verbose >= NORMAL_PRINT_LEVEL:
                 print(
-                    f"{iter:<9d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iterend-iterstart:<11.3f}"
+                    f"{iter:<9d} {self.e_cc:<20.12f} {self.e_cc - old_e:<20.12f} {iterend-iterstart:<11.3f}"
                 )
 
             # 4. check for convergence of the energy
-            if abs(self.energy - old_e) < e_conv:
+            if abs(self.e_cc - old_e) < e_conv:
                 break
-            old_e = self.energy
+            old_e = self.e_cc
 
         if iter == maxiter - 1:
             print("Warning: CC iterations did not converge!")
-        self.e_corr = self.energy - self.mf.e_tot
+        self.e_corr = self.e_cc - self.mf.e_tot
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print("=" * 65)
             print(f" Total time: {time.time()-start:11.3f} [s]")
 
         if self.verbose >= MINIMAL_PRINT_LEVEL:
-            print(f" CC energy:             {self.energy:20.12f} [Eh]")
+            print(f" CC energy:             {self.e_cc:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
+
+    def get_occ(self, orb):
+        nop = forte.SparseOperator()
+        nop.add(f"{orb}a+ {orb}a-", 1.0)
+        nop.add(f"{orb}b+ {orb}b-", 1.0)
+        state = self.apply_exp_op(self.op, self.ref)
+        return forte.overlap(self.ref, self.apply_exp_op_inv(self.op, nop @ state))
+
+    def get_dipole_z(self, psi, dets):
+        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
+        return forte.overlap(state, self.dip_z_op @ state)
+
+    def kernel_td(self, tamps_0, fieldfunc, max_t, propfunc, **kwargs):
+        gradfun = lambda t, y: self.evaluate_time_deriv(fieldfunc, t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, tamps_0, max_t, **kwargs)
+        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
+        i = 0
+        while True:
+            integrator.step()
+            if integrator.status != "running":
+                break
+            self.op.set_coefficients(list(integrator.y))
+            prop[i, 0] = integrator.t
+            prop[i, 1] = propfunc()
+            print(prop[i, 0])
+            print(prop[i, 1])
+            i += 1
+        if integrator.status == "failed":
+            raise RuntimeError("Time propagation failed")
+        return prop[:i, :]
+
+    def evaluate_time_deriv(self, fieldfunc, t):
+        op_t = self.evaluate_td_pert(fieldfunc, t)
+        residual,_ = self.cc_residual_equations(self.op, self.ham_op + op_t)
+        grad = self.evaluate_grad_ovlp()
+        return (-1j) * np.linalg.solve(grad, residual)
 
     def evaluate_grad_ovlp(self):
         # Evaluates <Psi_u|exp(-S) d/dt exp(S)|Psi_0> = <Phi_u|U_v+ s_v U_v|Phi_0>
@@ -649,50 +684,6 @@ class SparseCC(SparseBase):
         # push new amplitudes to the T operator
         self.op.set_coefficients(t)
 
-    def real_time_propagation(self, nsteps, dt=0.005, **kwargs):
-        start = time.time()
-
-        # initialize T = 0
-        t = [0.0] * len(self.op)
-        self.op.set_coefficients(t)
-
-        # initalize E = 0
-        old_e = 0.0
-
-        if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=" * 80)
-            print(
-                f"{'Iter':^5} {'Energy':^20} {'Delta Energy':^20} {'Imag Time':^15} {'Time':^15}"
-            )
-            print("-" * 80)
-
-        for iter in range(nsteps):
-            iterstart = time.time()
-            # 1. evaluate the CC residual equations
-            self.cc_residual_equations()
-
-            # 2. update the CC equations
-            self.update_amps_imag_time(dt)
-
-            iterend = time.time()
-
-            # 3. print information
-            if self.verbose >= NORMAL_PRINT_LEVEL:
-                print(
-                    f"{iter:<5d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iter*dt:<15.3f} {iterend-iterstart:<15.3f}"
-                )
-
-            old_e = self.energy
-
-        self.e_corr = self.energy - self.mf.e_tot
-        if self.verbose >= NORMAL_PRINT_LEVEL:
-            print("=" * 80)
-            print(f" Total time: {time.time()-start:11.3f} [s]")
-
-        if self.verbose >= MINIMAL_PRINT_LEVEL:
-            print(f" CC energy:             {self.energy:20.12f} [Eh]")
-            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
-
     def imag_time_relaxation(self, dt=0.005, **kwargs):
         e_conv = kwargs.get("e_conv", 1e-8)
         maxiter = kwargs.get("maxiter", 1000)
@@ -715,7 +706,7 @@ class SparseCC(SparseBase):
         for iter in range(maxiter):
             iterstart = time.time()
             # 1. evaluate the CC residual equations
-            self.cc_residual_equations()
+            self.residual, self.e_cc = self.cc_residual_equations(self.op, self.ham_op)
 
             # 2. update the CC equations
             self.update_amps_imag_time(dt)
@@ -725,23 +716,23 @@ class SparseCC(SparseBase):
             # 3. print information
             if self.verbose >= NORMAL_PRINT_LEVEL:
                 print(
-                    f"{iter:<5d} {self.energy:<20.12f} {self.energy - old_e:<20.12f} {iter*dt:<15.3f} {iterend-iterstart:<15.3f}"
+                    f"{iter:<5d} {self.e_cc:<20.12f} {self.e_cc - old_e:<20.12f} {iter*dt:<15.3f} {iterend-iterstart:<15.3f}"
                 )
 
             # 4. check for convergence of the energy
-            if abs(self.energy - old_e) < e_conv:
+            if abs(self.e_cc - old_e) < e_conv:
                 break
-            old_e = self.energy
+            old_e = self.e_cc
 
         if iter == maxiter - 1:
             print("Warning: CC iterations did not converge!")
-        self.e_corr = self.energy - self.mf.e_tot
+        self.e_corr = self.e_cc - self.mf.e_tot
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print("=" * 80)
             print(f" Total time: {time.time()-start:11.3f} [s]")
 
         if self.verbose >= MINIMAL_PRINT_LEVEL:
-            print(f" CC energy:             {self.energy:20.12f} [Eh]")
+            print(f" CC energy:             {self.e_cc:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
     def make_eom_basis(self, nhole, npart, ms2=0, first=False):
@@ -915,7 +906,7 @@ class SparseCC(SparseBase):
                     forte.SparseState({d: c for d, c in zip(eom_basis, eom_eigvec[i])})
                 )
                 print(
-                    f"{i:^4d} {eom_eigval[i]:^20.12f} {eom_eigval[i] - self.energy:^20.12f} {(eom_eigval[i] - self.energy) * EH_TO_EV:^20.12f} {s2:^10.3f}"
+                    f"{i:^4d} {eom_eigval[i]:^20.12f} {eom_eigval[i] - self.e_cc:^20.12f} {(eom_eigval[i] - self.e_cc) * EH_TO_EV:^20.12f} {s2:^10.3f}"
                 )
             print("=" * 78)
         return eom_eigval, eom_eigvec

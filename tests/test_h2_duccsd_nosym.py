@@ -5,23 +5,22 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from sparse_cc import *
 
 
-def test_h2o_ccsd():
+def test_h2_duccsd_nosym():
     mol = pyscf.gto.M(
         atom="""
-    O
-    H 1 1.1
-    H 1 1.1 2 104""",
-        basis="sto-6g",
-        symmetry="c2v",
+    H 0 0 0
+    H 0 0 0.7354""",
+        basis="6-31++g(d,p)",
+        symmetry="c1",
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="cc")
+    cc = SparseCC(mf, verbose=5, cc_type="ducc")
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_cc, -75.728060006019, atol=1e-8)
+    assert np.isclose(cc.e_cc, -1.165273977770, atol=1e-8)
 
 
 if __name__ == "__main__":
-    test_h2o_ccsd()
+    test_h2_duccsd_nosym()
