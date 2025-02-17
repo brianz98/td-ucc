@@ -519,13 +519,13 @@ class SparseCC(SparseBase):
                 print(f"{sqop}")
 
     def cc_residual_equations(self, op, ham):
-        # Step 1. Compute exp(T)|Phi>
+        # Step 1. Compute exp(S)|Phi>
         wfn = self.apply_exp_op(op, self.ref)
 
-        # Step 2. Compute H exp(T)|Phi>
+        # Step 2. Compute H exp(S)|Phi>
         Hwfn = forte.apply_op(ham, wfn, screen_thresh=self.ham_screen_thresh)
 
-        # Step 3. Compute exp(-T) H exp(T)|Phi>
+        # Step 3. Compute exp(-S) H exp(S)|Phi>
         R = self.apply_exp_op_inv(op, Hwfn)
 
         # Step 4. Project residual onto excited determinants
@@ -609,12 +609,12 @@ class SparseCC(SparseBase):
         nop = forte.SparseOperator()
         nop.add(f"{orb}a+ {orb}a-", 1.0)
         nop.add(f"{orb}b+ {orb}b-", 1.0)
-        state = self.apply_exp_op(self.op, self.ref)
-        return forte.overlap(self.ref, self.apply_exp_op_inv(self.op, nop @ state))
+        u_psi = self.apply_exp_op(self.op, self.ref)
+        n_u_psi = forte.apply_op(nop, u_psi)
+        return forte.overlap(u_psi, n_u_psi)
 
     def get_dipole_z(self, psi, dets):
-        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
-        return forte.overlap(state, self.dip_z_op @ state)
+        raise NotImplementedError
 
     def kernel_td(self, tamps_0, fieldfunc, max_t, propfunc, **kwargs):
         gradfun = lambda t, y: self.evaluate_time_deriv(fieldfunc, t)
@@ -628,8 +628,6 @@ class SparseCC(SparseBase):
             self.op.set_coefficients(list(integrator.y))
             prop[i, 0] = integrator.t
             prop[i, 1] = propfunc()
-            print(prop[i, 0])
-            print(prop[i, 1])
             i += 1
         if integrator.status == "failed":
             raise RuntimeError("Time propagation failed")
@@ -637,7 +635,7 @@ class SparseCC(SparseBase):
 
     def evaluate_time_deriv(self, fieldfunc, t):
         op_t = self.evaluate_td_pert(fieldfunc, t)
-        residual,_ = self.cc_residual_equations(self.op, self.ham_op + op_t)
+        residual, _ = self.cc_residual_equations(self.op, self.ham_op + op_t)
         grad = self.evaluate_grad_ovlp()
         return (-1j) * np.linalg.solve(grad, residual)
 
