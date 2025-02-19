@@ -412,18 +412,18 @@ class SparseCC(SparseBase):
                 )
             else:
                 self.apply_exp_op = functools.partial(
-                    self.exp_op.apply_antiherm, scaling_factor=1.0
+                    self.exp_op.apply_antiherm, scaling_factor=1.0, reverse=True
                 )
                 self.apply_exp_op_inv = functools.partial(
-                    self.exp_op.apply_antiherm, scaling_factor=-1.0
+                    self.exp_op.apply_antiherm, scaling_factor=-1.0, reverse=True
                 )
         else:
             if self.factorized:
                 self.apply_exp_op = functools.partial(
-                    self.exp_op.apply_op, inverse=False
+                    self.exp_op.apply_op, inverse=False, reverse=True
                 )
                 self.apply_exp_op_inv = functools.partial(
-                    self.exp_op.apply_op, inverse=True
+                    self.exp_op.apply_op, inverse=True, reverse=True
                 )
             else:
                 self.apply_exp_op = functools.partial(
@@ -563,7 +563,9 @@ class SparseCC(SparseBase):
         diis_start = kwargs.get("diis_start", 2)
         do_oo = kwargs.get("do_oo", False)
         if do_oo and self.cc_type != "ducc":
-            raise NotImplementedError("Orbital optimization is only implemented for DUCC")
+            raise NotImplementedError(
+                "Orbital optimization is only implemented for DUCC"
+            )
 
         diis = DIIS(diis_nvecs, diis_start)
 
@@ -636,8 +638,10 @@ class SparseCC(SparseBase):
         if self.unitary and not self.factorized:
             raise RuntimeError("Entangled TD-UCC is not supported")
         if not self.unitary:
-            raise NotImplementedError("Time-dependent traditional CC is not implemented yet")
-        gradfun = lambda t, y: (-1j)*self.evaluate_amp_time_deriv(y, fieldfunc, t)
+            raise NotImplementedError(
+                "Time-dependent traditional CC is not implemented yet"
+            )
+        gradfun = lambda t, y: (-1j) * self.evaluate_amp_time_deriv(y, fieldfunc, t)
         self.integrator = scipy.integrate.RK45(gradfun, 0.0, tamps_0, max_t, **kwargs)
         numpoints = math.ceil(max_t / kwargs["max_step"]) * 5
         prop = np.zeros((numpoints, 2), dtype=np.complex128)
@@ -652,11 +656,13 @@ class SparseCC(SparseBase):
             print(self.integrator.t)
             if self.integrator.status != "running":
                 break
-            maxr = np.max(np.abs(self.integrator.y)) 
-            if maxr > 2*np.pi:
-                inds = np.argwhere(np.abs(self.integrator.y) > 2*np.pi)
+            maxr = np.max(np.abs(self.integrator.y))
+            if maxr > 2 * np.pi:
+                inds = np.argwhere(np.abs(self.integrator.y) > 2 * np.pi)
                 for ind in inds:
-                    self.integrator.y[ind] *= (abs(self.integrator.y[ind]) % (2*np.pi)) / abs(self.integrator.y[ind]) 
+                    self.integrator.y[ind] *= (
+                        abs(self.integrator.y[ind]) % (2 * np.pi)
+                    ) / abs(self.integrator.y[ind])
             self.op.set_coefficients(list(self.integrator.y))
             prop[i, 0] = self.integrator.t
             prop[i, 1] = propfunc()
@@ -667,7 +673,7 @@ class SparseCC(SparseBase):
         """
         Evaluates the time derivative of the amplitudes, calculated from
         d Psi / dt = H Psi => Ax - Bx* = r, where A, B = grad_ovlp, r = residual
-        
+
         !!! Note !!!
         The imaginary unit is not put in, this is for a unified interface
         with imaginary time relaxation.
@@ -679,10 +685,12 @@ class SparseCC(SparseBase):
         else:
             residual, _ = self.cc_residual_equations(self.op_td, self.ham_op)
         grad_a, grad_b = self.evaluate_grad_ovlp(self.op_td)
-        grad_block = np.block([[np.real(grad_a), np.imag(grad_b)], [np.imag(grad_a), np.real(grad_b)]])
+        grad_block = np.block(
+            [[np.real(grad_a), np.imag(grad_b)], [np.imag(grad_a), np.real(grad_b)]]
+        )
         res_block = np.block([np.real(residual), np.imag(residual)])
         dt = np.linalg.solve(grad_block, res_block)
-        return dt[:len(tamps)] + 1j*dt[len(tamps):]
+        return dt[: len(tamps)] + 1j * dt[len(tamps) :]
 
     def evaluate_grad_ovlp(self, op):
         """
@@ -717,7 +725,7 @@ class SparseCC(SparseBase):
             grad_a[:, nu] = forte.get_projection(op, self.ref, u_k_u_psi_a)
             grad_b[:, nu] = forte.get_projection(op, self.ref, u_k_u_psi_b)
         return grad_a, grad_b
-    
+
     def update_amps_imag_time(self, dt):
         t = self.op.coefficients()
         if self.unitary:
@@ -732,7 +740,9 @@ class SparseCC(SparseBase):
 
     def imag_time_relaxation(self, dt=0.005, **kwargs):
         if self.unitary and not self.factorized:
-            raise RuntimeError("Time derivative is not supported for entangled unitary CC")
+            raise RuntimeError(
+                "Time derivative is not supported for entangled unitary CC"
+            )
         e_conv = kwargs.get("e_conv", 1e-8)
         maxiter = kwargs.get("maxiter", 1000)
         start = time.time()
