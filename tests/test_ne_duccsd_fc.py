@@ -9,11 +9,11 @@ def test_ne_duccsd_fc():
     mol = pyscf.gto.M(atom="Ne", basis="cc-pvdz", symmetry="d2h")
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="ducc", frozen_core=1)
+    cc = SparseCC(mf, verbose=2, cc_type="ducc", frozen_core=1)
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_cc, -128.677997135198, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.189221583457, atol=1e-8)
 
 
 if __name__ == "__main__":

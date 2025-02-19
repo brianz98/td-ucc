@@ -19,7 +19,7 @@ def test_h2ion_fci():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    ci = SparseCI(mf, 2, (1, 0), verbose=5)
+    ci = SparseCI(mf, 2, (1, 0), verbose=2)
     e, _ = ci.kernel(solver="eigh")
     assert np.isclose(e[0], -0.5859588012891606, atol=1e-8)
 

@@ -15,11 +15,11 @@ def test_h2_duccsd_nosym():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="ducc")
+    cc = SparseCC(mf, verbose=2, cc_type="ducc")
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_cc, -1.165273977770, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.033875238656, atol=1e-8)
 
 
 if __name__ == "__main__":

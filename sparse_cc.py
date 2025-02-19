@@ -394,6 +394,7 @@ class SparseCC(SparseBase):
         self.verbose = verbose
         self.factorized = "d" in cc_type
         self.unitary = "u" in cc_type
+        self.cc_type = cc_type
 
         if self.factorized:
             self.exp_op = forte.SparseFactExp(screen_thresh=exp_screen_thresh)
@@ -510,12 +511,15 @@ class SparseCC(SparseBase):
                                 for i in reversed(ao):
                                     op_str.append(f"{i}a-")
                                 self.tn.add(f"{' '.join(op_str)}", 0.0)
+        self.nt1 = len(self.t1)
         self.op = self.t1 + self.tn
         self.op_td = self.t1 + self.tn
         self.denominators = self.t1_denom + self.tn_denom
-        if self.verbose >= DEBUG_PRINT_LEVEL:
+        if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"\n==> Cluster operator <==")
             print(f"Number of amplitudes: {len(self.op)}")
+            print(f"Number of singles:    {self.nt1}")
+        if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"Operator components:")
             for sqop, c in self.op:
                 print(f"{sqop}")
@@ -557,6 +561,9 @@ class SparseCC(SparseBase):
         maxiter = kwargs.get("maxiter", 100)
         diis_nvecs = kwargs.get("diis_nvecs", 6)
         diis_start = kwargs.get("diis_start", 2)
+        do_oo = kwargs.get("do_oo", False)
+        if do_oo and self.cc_type != "ducc":
+            raise NotImplementedError("Orbital optimization is only implemented for DUCC")
 
         diis = DIIS(diis_nvecs, diis_start)
 
@@ -578,6 +585,13 @@ class SparseCC(SparseBase):
             iterstart = time.time()
             # 1. evaluate the CC residual equations
             self.residual, self.e_cc = self.cc_residual_equations(self.op, self.ham_op)
+
+            # print(np.real(self.op.coefficients()[:self.nt1]))
+            if do_oo:
+                t1_amp = self.residual[: self.nt1] / self.t1_denom
+                self.t1.set_coefficients(list(t1_amp))
+                forte.fact_unitary_trans_antiherm(self.ham_op, self.t1)
+                self.residual[: self.nt1] = 0.0
 
             # 2. update the CC equations
             tamps = self.update_amps(tamps, diis)

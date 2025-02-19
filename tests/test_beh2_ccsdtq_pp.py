@@ -16,11 +16,11 @@ def test_beh2_ccsdtq_pp():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="cc")
+    cc = SparseCC(mf, verbose=2, cc_type="cc")
 
     cc.make_cluster_operator(max_exc=4, pp=True)
     cc.kernel()
-    assert np.isclose(cc.e_cc, -15.797547040572, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.057165169573, atol=1e-8)
 
 
 if __name__ == "__main__":

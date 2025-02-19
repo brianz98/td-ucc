@@ -16,11 +16,11 @@ def test_h2o_duccsd():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="ducc")
+    cc = SparseCC(mf, verbose=2, cc_type="ducc")
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_cc, -75.728133374874, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.071345479275, atol=1e-8)
 
 
 if __name__ == "__main__":

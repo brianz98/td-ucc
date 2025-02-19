@@ -16,7 +16,7 @@ def test_h2o_eom_ea_2h3p_ccsd():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=5, cc_type="cc")
+    cc = SparseCC(mf, verbose=2, cc_type="cc")
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
