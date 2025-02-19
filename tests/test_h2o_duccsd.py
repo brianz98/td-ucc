@@ -20,7 +20,7 @@ def test_h2o_duccsd():
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_corr, -0.071345479275, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.071355412429, atol=1e-8)
 
 
 if __name__ == "__main__":

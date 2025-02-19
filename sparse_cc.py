@@ -405,17 +405,17 @@ class SparseCC(SparseBase):
         if self.unitary:
             if self.factorized:
                 self.apply_exp_op = functools.partial(
-                    self.exp_op.apply_antiherm, inverse=False
+                    self.exp_op.apply_antiherm, inverse=False, reverse=True
                 )
                 self.apply_exp_op_inv = functools.partial(
-                    self.exp_op.apply_antiherm, inverse=True
+                    self.exp_op.apply_antiherm, inverse=True, reverse=True
                 )
             else:
                 self.apply_exp_op = functools.partial(
-                    self.exp_op.apply_antiherm, scaling_factor=1.0, reverse=True
+                    self.exp_op.apply_antiherm, scaling_factor=1.0
                 )
                 self.apply_exp_op_inv = functools.partial(
-                    self.exp_op.apply_antiherm, scaling_factor=-1.0, reverse=True
+                    self.exp_op.apply_antiherm, scaling_factor=-1.0
                 )
         else:
             if self.factorized:
@@ -588,9 +588,8 @@ class SparseCC(SparseBase):
             # 1. evaluate the CC residual equations
             self.residual, self.e_cc = self.cc_residual_equations(self.op, self.ham_op)
 
-            # print(np.real(self.op.coefficients()[:self.nt1]))
             if do_oo:
-                t1_amp = self.residual[: self.nt1] / self.t1_denom
+                t1_amp = self.residual[:self.nt1] / self.t1_denom
                 self.t1.set_coefficients(list(t1_amp))
                 forte.fact_unitary_trans_antiherm(self.ham_op, self.t1)
                 self.residual[: self.nt1] = 0.0

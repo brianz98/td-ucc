@@ -13,7 +13,7 @@ def test_ne_duccsd_fc():
 
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    assert np.isclose(cc.e_corr, -0.189221583457, atol=1e-8)
+    assert np.isclose(cc.e_corr, -0.189228115951, atol=1e-8)
 
 
 if __name__ == "__main__":

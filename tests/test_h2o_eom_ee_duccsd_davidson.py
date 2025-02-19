@@ -30,12 +30,12 @@ def test_h2o_eom_ee_duccsd_davidson():
         max_cycle=100,
         nroots=6,
     )
-    assert np.isclose(e[0] - cc.e_cc, 0.274374987353, atol=1e-8)
-    assert np.isclose(e[1] - cc.e_cc, 0.321110755688, atol=1e-8)
-    assert np.isclose(e[2] - cc.e_cc, 0.357311727855, atol=1e-8)
-    assert np.isclose(e[3] - cc.e_cc, 0.363994210500, atol=1e-8)
-    assert np.isclose(e[4] - cc.e_cc, 0.390211952752, atol=1e-8)
-    assert np.isclose(e[5] - cc.e_cc, 0.422970899596, atol=1e-8)
+    assert np.isclose(e[0] - cc.e_cc, 0.274357896910, atol=1e-8)
+    assert np.isclose(e[1] - cc.e_cc, 0.321080833292, atol=1e-8)
+    assert np.isclose(e[2] - cc.e_cc, 0.357318814370, atol=1e-8)
+    assert np.isclose(e[3] - cc.e_cc, 0.364014821771, atol=1e-8)
+    assert np.isclose(e[4] - cc.e_cc, 0.390220287852, atol=1e-8)
+    assert np.isclose(e[5] - cc.e_cc, 0.422972981800, atol=1e-8)
 
 
 if __name__ == "__main__":
