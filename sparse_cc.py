@@ -352,7 +352,8 @@ class SparseCI(SparseBase):
     def kernel_td(self, psi_0, dets, fieldfunc, max_t, propfunc, **kwargs):
         gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
         integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
-        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
+        numpoints = math.ceil(max_t / kwargs["max_step"]) * 2
+        prop = np.zeros((numpoints, 2), dtype=np.complex128)
         i = 0
         while True:
             integrator.step()
@@ -510,6 +511,7 @@ class SparseCC(SparseBase):
                                     op_str.append(f"{i}a-")
                                 self.tn.add(f"{' '.join(op_str)}", 0.0)
         self.op = self.t1 + self.tn
+        self.op_td = self.t1 + self.tn
         self.denominators = self.t1_denom + self.tn_denom
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"\n==> Cluster operator <==")
@@ -617,72 +619,106 @@ class SparseCC(SparseBase):
         raise NotImplementedError
 
     def kernel_td(self, tamps_0, fieldfunc, max_t, propfunc, **kwargs):
-        gradfun = lambda t, y: self.evaluate_time_deriv(fieldfunc, t)
-        integrator = scipy.integrate.RK45(gradfun, 0.0, tamps_0, max_t, **kwargs)
-        prop = np.zeros((math.ceil(max_t / kwargs["max_step"]), 2), dtype=np.complex128)
+        if self.unitary and not self.factorized:
+            raise RuntimeError("Entangled TD-UCC is not supported")
+        if not self.unitary:
+            raise NotImplementedError("Time-dependent traditional CC is not implemented yet")
+        gradfun = lambda t, y: (-1j)*self.evaluate_amp_time_deriv(y, fieldfunc, t)
+        self.integrator = scipy.integrate.RK45(gradfun, 0.0, tamps_0, max_t, **kwargs)
+        numpoints = math.ceil(max_t / kwargs["max_step"]) * 5
+        prop = np.zeros((numpoints, 2), dtype=np.complex128)
         i = 0
         while True:
-            integrator.step()
-            if integrator.status != "running":
+            try:
+                self.integrator.step()
+            except Exception as e:
+                print(e)
                 break
-            self.op.set_coefficients(list(integrator.y))
-            prop[i, 0] = integrator.t
+
+            print(self.integrator.t)
+            if self.integrator.status != "running":
+                break
+            maxr = np.max(np.abs(self.integrator.y)) 
+            if maxr > 2*np.pi:
+                inds = np.argwhere(np.abs(self.integrator.y) > 2*np.pi)
+                for ind in inds:
+                    self.integrator.y[ind] *= (abs(self.integrator.y[ind]) % (2*np.pi)) / abs(self.integrator.y[ind]) 
+            self.op.set_coefficients(list(self.integrator.y))
+            prop[i, 0] = self.integrator.t
             prop[i, 1] = propfunc()
             i += 1
-        if integrator.status == "failed":
-            raise RuntimeError("Time propagation failed")
         return prop[:i, :]
 
-    def evaluate_time_deriv(self, fieldfunc, t):
-        op_t = self.evaluate_td_pert(fieldfunc, t)
-        residual, _ = self.cc_residual_equations(self.op, self.ham_op + op_t)
-        grad = self.evaluate_grad_ovlp()
-        return (-1j) * np.linalg.solve(grad, residual)
+    def evaluate_amp_time_deriv(self, tamps, fieldfunc=None, t=None):
+        """
+        Evaluates the time derivative of the amplitudes, calculated from
+        d Psi / dt = H Psi => Ax - Bx* = r, where A, B = grad_ovlp, r = residual
+        
+        !!! Note !!!
+        The imaginary unit is not put in, this is for a unified interface
+        with imaginary time relaxation.
+        """
+        self.op_td.set_coefficients(list(tamps))
+        if fieldfunc is not None:
+            op_t = self.evaluate_td_pert(fieldfunc, t)
+            residual, _ = self.cc_residual_equations(self.op_td, self.ham_op + op_t)
+        else:
+            residual, _ = self.cc_residual_equations(self.op_td, self.ham_op)
+        grad_a, grad_b = self.evaluate_grad_ovlp(self.op_td)
+        grad_block = np.block([[np.real(grad_a), np.imag(grad_b)], [np.imag(grad_a), np.real(grad_b)]])
+        res_block = np.block([np.real(residual), np.imag(residual)])
+        dt = np.linalg.solve(grad_block, res_block)
+        return dt[:len(tamps)] + 1j*dt[len(tamps):]
 
-    def evaluate_grad_ovlp(self):
-        # Evaluates <Psi_u|exp(-S) d/dt exp(S)|Psi_0> = <Phi_u|U_v+ s_v U_v|Phi_0>
-        # U_v = Prod_{i=v}^{N} exp(s_i * t_i(t))
-        grad = np.zeros((len(self.op), len(self.op)), dtype=np.complex128)
-        for nu in reversed(range(len(self.op))):
-            op_nu = self.op(nu)
-            kappa_nu = forte.SparseOperator()
-            kappa_nu.add(op_nu[0], 1.0)
-            if self.unitary:
-                kappa_nu.add(op_nu[0].adjoint(), -1.0)
+    def evaluate_grad_ovlp(self, op):
+        """
+        Evaluates <Psi_u|exp(-S) d/dt exp(S)|Psi_0> = <Phi_u|U_v+ s_v U_v|Phi_0>
+        U_v = Prod_{i=v}^{N} exp(s_i * t_i(t))
+        grad_a = <Phi_u|U_v+ (t_v - t_v^+) U_v|Phi_0>
+        grad_b = <Phi_u|U_v+ (t_v + t_v^+) U_v|Phi_0>
+        """
+        grad_a = np.zeros((len(op), len(op)), dtype=np.complex128)
+        grad_b = np.zeros((len(op), len(op)), dtype=np.complex128)
+        for nu in reversed(range(len(op))):
+            op_nu = op(nu)
+            kappa_nu_a = forte.SparseOperator()
+            kappa_nu_a.add(op_nu[0], 1.0)
+            kappa_nu_a.add(op_nu[0].adjoint(), -1.0)
+
+            kappa_nu_b = forte.SparseOperator()
+            kappa_nu_b.add(op_nu[0], 1.0)
+            kappa_nu_b.add(op_nu[0].adjoint(), +1.0)
 
             u_nu = forte.SparseOperatorList()
             u_nu.add(op_nu[0], op_nu[1])
 
-            if nu == len(self.op) - 1:
-                u_psi = self.apply_exp_op(u_nu, self.ref, inverse=False)
+            if nu == len(op) - 1:
+                u_psi = self.apply_exp_op(u_nu, self.ref)
             else:
-                u_psi = self.apply_exp_op(u_nu, u_psi, inverse=False)
-            k_u_psi = forte.apply_op(kappa_nu, u_psi)
-            u_k_u_psi = self.apply_exp_op_inv(u_nu, k_u_psi, inverse=True)
-            grad[:, nu] = forte.get_projection(self.op, self.ref, u_k_u_psi)
-        return grad
-
+                u_psi = self.apply_exp_op(u_nu, u_psi)
+            k_u_psi_a = forte.apply_op(kappa_nu_a, u_psi)
+            k_u_psi_b = forte.apply_op(kappa_nu_b, u_psi)
+            u_k_u_psi_a = self.apply_exp_op_inv(u_nu, k_u_psi_a)
+            u_k_u_psi_b = self.apply_exp_op_inv(u_nu, k_u_psi_b)
+            grad_a[:, nu] = forte.get_projection(op, self.ref, u_k_u_psi_a)
+            grad_b[:, nu] = forte.get_projection(op, self.ref, u_k_u_psi_b)
+        return grad_a, grad_b
+    
     def update_amps_imag_time(self, dt):
         t = self.op.coefficients()
-        grad = self.evaluate_grad_ovlp()
-        delta = np.linalg.solve(grad, self.residual)
+        if self.unitary:
+            delta = -self.evaluate_amp_time_deriv(t)
+        else:
+            delta = -self.residual
         # update the amplitudes
         for i in range(len(self.op)):
-            t[i] -= delta[i] * dt
-        # push new amplitudes to the T operator
-        self.op.set_coefficients(t)
-
-    def update_amps_real_time(self, dt):
-        t = self.op.coefficients()
-        grad = self.evaluate_grad_ovlp()
-        delta = (0 + 1j) * np.linalg.solve(grad, self.residual)
-        # update the amplitudes
-        for i in range(len(self.op)):
-            t[i] -= delta[i] * dt
+            t[i] += delta[i] * dt
         # push new amplitudes to the T operator
         self.op.set_coefficients(t)
 
     def imag_time_relaxation(self, dt=0.005, **kwargs):
+        if self.unitary and not self.factorized:
+            raise RuntimeError("Time derivative is not supported for entangled unitary CC")
         e_conv = kwargs.get("e_conv", 1e-8)
         maxiter = kwargs.get("maxiter", 1000)
         start = time.time()
@@ -754,6 +790,8 @@ class SparseCC(SparseBase):
                     bp = p - ap
                     if (ah - ap) - (bh - bp) != ms2:
                         continue
+                    if any([ah > self.nael, bh > self.nbel]):
+                        continue
                     for ao in itertools.combinations(self.occ, self.nael - ah):
                         ao_sym = sym_dir_prod(self.orbsym[list(ao)])
                         for av in itertools.combinations(self.vir, ap):
@@ -803,6 +841,9 @@ class SparseCC(SparseBase):
                     H[i, j] = forte.overlap(basis_states[i], R)
 
         return H
+
+    def kernel_td_eom(self, eom_states, fieldfunc, max_t, propfunc, **kwargs):
+        pass
 
     def eom_eig(self, basis):
         hbar = self.make_hbar_eom(basis)
