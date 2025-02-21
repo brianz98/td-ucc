@@ -8,18 +8,13 @@ from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
 from collections import deque
 import scipy, scipy.linalg, scipy.constants, scipy.integrate
 import math
+from utils import *
 
 EH_TO_EV = scipy.constants.value("Hartree energy in eV")
 MINIMAL_PRINT_LEVEL = 1
 NORMAL_PRINT_LEVEL = 2
 DEBUG_PRINT_LEVEL = 3
 NIRREP = {"c1": 1, "cs": 2, "ci": 2, "c2": 2, "c2v": 4, "c2h": 4, "d2": 4, "d2h": 8}
-
-
-def sym_dir_prod(sym_list):
-    if len(sym_list) == 0:
-        return 0
-    return functools.reduce(lambda x, y: x ^ y, sym_list)
 
 
 class SparseBase:
@@ -364,7 +359,7 @@ class SparseCI(SparseBase):
         gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
         integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
         numpoints = math.ceil(max_t / kwargs["max_step"]) * 2
-        prop = np.zeros((numpoints, 1+len(propfuncs)), dtype=np.complex128)
+        prop = np.zeros((numpoints, 1 + len(propfuncs)), dtype=np.complex128)
         i = 0
         while True:
             integrator.step()
@@ -456,73 +451,32 @@ class SparseCC(SparseBase):
         mo_space["corr"] = slice(frozen_core, mf.mol.nao)
         return mo_space
 
-    def make_cluster_operator(self, max_exc, pp=True):
+    def make_cluster_operator(self, max_exc, pair=None, general=False):
         # Prepare the cluster operator (closed-shell case)
         if self.verbose >= DEBUG_PRINT_LEVEL:
             print(f"Occupied orbitals: {self.occ}")
             print(f"Virtual orbitals:  {self.vir}")
 
-        self.t1 = forte.SparseOperatorList()
+        self.t1, self.t1_denom = make_tn_operator(
+            1, self.eps, (self.occ, self.vir), self.orbsym, self.root_sym
+        )
+
         self.tn = forte.SparseOperatorList()
-        self.t1_denom = []
         self.tn_denom = []
-
-        # do singles first
-        for i in self.occ:
-            for a in self.vir:
-                if self.orbsym[i] ^ self.orbsym[a] != self.root_sym:
-                    continue
-                self.t1.add(f"{a}a+ {i}a-", 0.0)
-                self.t1_denom.append(self.eps[i] - self.eps[a])
-                self.t1.add(f"{a}b+ {i}b-", 0.0)
-                self.t1_denom.append(self.eps[i] - self.eps[a])
-
         # loop over total excitation level
         for n in range(2, max_exc + 1):
-            # loop over beta excitation level
-            for nb in range(n + 1):
-                na = n - nb
-                # loop over alpha occupied
-                for ao in itertools.combinations(self.occ, na):
-                    ao_sym = sym_dir_prod(self.orbsym[list(ao)])
-                    # loop over alpha virtual
-                    for av in itertools.combinations(self.vir, na):
-                        av_sym = sym_dir_prod(self.orbsym[list(av)])
-                        # loop over beta occupied
-                        for bo in itertools.combinations(self.occ, nb):
-                            bo_sym = sym_dir_prod(self.orbsym[list(bo)])
-                            # loop over beta virtual
-                            for bv in itertools.combinations(self.vir, nb):
-                                bv_sym = sym_dir_prod(self.orbsym[list(bv)])
-                                if ao_sym ^ av_sym ^ bo_sym ^ bv_sym != self.root_sym:
-                                    continue
-                                if n >= 3 and pp:
-                                    if len(set(ao + bo)) != 2 or len(set(av + bv)) != 2:
-                                        continue
-                                # compute the denominators
-                                e_aocc = functools.reduce(
-                                    lambda x, y: x + self.eps[y], ao, 0.0
-                                )
-                                e_avir = functools.reduce(
-                                    lambda x, y: x + self.eps[y], av, 0.0
-                                )
-                                e_bocc = functools.reduce(
-                                    lambda x, y: x + self.eps[y], bo, 0.0
-                                )
-                                e_bvir = functools.reduce(
-                                    lambda x, y: x + self.eps[y], bv, 0.0
-                                )
-                                self.tn_denom.append(e_aocc + e_bocc - e_bvir - e_avir)
-                                op_str = []  # a list to hold the operator triplets
-                                for i in av:
-                                    op_str.append(f"{i}a+")
-                                for i in bv:
-                                    op_str.append(f"{i}b+")
-                                for i in reversed(bo):
-                                    op_str.append(f"{i}b-")
-                                for i in reversed(ao):
-                                    op_str.append(f"{i}a-")
-                                self.tn.add(f"{' '.join(op_str)}", 0.0)
+            tn, tn_denom = make_tn_operator(
+                n,
+                self.eps,
+                (self.occ, self.vir),
+                self.orbsym,
+                self.root_sym,
+                pair=pair,
+                general=general,
+            )
+            self.tn += tn
+            self.tn_denom += tn_denom
+
         self.nt1 = len(self.t1)
         self.op = self.t1 + self.tn
         self.op_td = self.t1 + self.tn

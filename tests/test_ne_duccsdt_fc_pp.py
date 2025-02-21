@@ -11,7 +11,7 @@ def test_ne_duccsdt_fc_pp():
     mf.kernel()
     cc = SparseCC(mf, verbose=2, cc_type="ducc", frozen_core=1)
 
-    cc.make_cluster_operator(max_exc=3, pp=True)
+    cc.make_cluster_operator(max_exc=3, pair=3)
     cc.kernel()
     assert np.isclose(cc.e_corr, -0.189729548769, atol=1e-8)
 

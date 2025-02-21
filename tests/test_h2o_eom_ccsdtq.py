@@ -18,7 +18,7 @@ def test_h2o_eom_ccsdtq():
     mf.kernel()
     cc = SparseCC(mf, verbose=2, cc_type="cc")
 
-    cc.make_cluster_operator(max_exc=4, pp=False)
+    cc.make_cluster_operator(max_exc=4)
     cc.kernel()
     e, _ = cc.run_eom(nhole=4, npart=4, ms2=0, print_eigvals=True)
     assert np.isclose(e[0] - cc.e_cc, 0.273489391393, atol=1e-8)

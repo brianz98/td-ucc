@@ -18,7 +18,7 @@ def test_beh2_ccsdtq_pp():
     mf.kernel()
     cc = SparseCC(mf, verbose=2, cc_type="cc")
 
-    cc.make_cluster_operator(max_exc=4, pp=True)
+    cc.make_cluster_operator(max_exc=4, pair=3)
     cc.kernel()
     assert np.isclose(cc.e_corr, -0.057165169573, atol=1e-8)
 

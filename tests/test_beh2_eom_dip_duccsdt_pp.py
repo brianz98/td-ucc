@@ -18,7 +18,7 @@ def test_beh2_eom_dip_duccsdt_pp():
     mf.kernel()
     cc = SparseCC(mf, verbose=2, cc_type="ducc")
 
-    cc.make_cluster_operator(max_exc=3, pp=True)
+    cc.make_cluster_operator(max_exc=3, pair=3)
     cc.kernel()
     e, _ = cc.run_eom(nhole=3, npart=1, ms2=0, print_eigvals=True)
     assert np.isclose(e[0] - cc.e_cc, 1.163161418271, atol=1e-8)
