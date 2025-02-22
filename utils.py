@@ -65,3 +65,44 @@ def make_tn_operator(exc, eps, orbs, orbsym, root_sym, pair=None, general=False)
                             op_str.append(f"{i}a-")
                         op.add(f"{' '.join(op_str)}", 0.0)
     return op, denom
+
+
+def enumerate_determinants(
+    nael, nbel, orbs, orbsym, nhole, npart, root_sym, ms2, core=None
+):
+    occ, vir = orbs
+    states = []
+
+    for ah in range(nhole + 1):
+        bh = nhole - ah
+        for ap in range(npart + 1):
+            bp = npart - ap
+            if (ah - ap) - (bh - bp) != ms2:
+                continue
+            if any([ah > nael, bh > nbel]):
+                continue
+            for ao in itertools.combinations(occ, nael - ah):
+                ao_sym = sym_dir_prod(orbsym[list(ao)])
+                for av in itertools.combinations(vir, ap):
+                    av_sym = sym_dir_prod(orbsym[list(av)])
+                    for bo in itertools.combinations(occ, nbel - bh):
+                        bo_sym = sym_dir_prod(orbsym[list(bo)])
+                        for bv in itertools.combinations(vir, bp):
+                            bv_sym = sym_dir_prod(orbsym[list(bv)])
+                            if ao_sym ^ av_sym ^ bo_sym ^ bv_sym != root_sym and root_sym != -1:
+                                continue
+                            if core is not None:
+                                # no core orbital can be doubly occupied
+                                if any([(ao+bo).count(i) == 2 for i in core]):
+                                    continue
+                            d = forte.Determinant()
+                            for i in ao:
+                                d.set_alfa_bit(i, True)
+                            for i in av:
+                                d.set_alfa_bit(i, True)
+                            for i in bo:
+                                d.set_beta_bit(i, True)
+                            for i in bv:
+                                d.set_beta_bit(i, True)
+                            states.append(d)
+    return states

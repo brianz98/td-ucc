@@ -773,7 +773,7 @@ class SparseCC(SparseBase):
             print(f" CC energy:             {self.e_cc:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
-    def make_eom_basis(self, nhole, npart, ms2=0, first=False):
+    def make_eom_basis(self, nhole, npart, ms2=0, first=False, all_sym=True, core=None):
         states = []
 
         hp = []
@@ -788,37 +788,18 @@ class SparseCC(SparseBase):
             hp.remove((0, 0))
 
         for h, p in hp:
-            for ah in range(h + 1):
-                bh = h - ah
-                for ap in range(p + 1):
-                    bp = p - ap
-                    if (ah - ap) - (bh - bp) != ms2:
-                        continue
-                    if any([ah > self.nael, bh > self.nbel]):
-                        continue
-                    for ao in itertools.combinations(self.occ, self.nael - ah):
-                        ao_sym = sym_dir_prod(self.orbsym[list(ao)])
-                        for av in itertools.combinations(self.vir, ap):
-                            av_sym = sym_dir_prod(self.orbsym[list(av)])
-                            for bo in itertools.combinations(self.occ, self.nbel - bh):
-                                bo_sym = sym_dir_prod(self.orbsym[list(bo)])
-                                for bv in itertools.combinations(self.vir, bp):
-                                    bv_sym = sym_dir_prod(self.orbsym[list(bv)])
-                                    # if (
-                                    #     ao_sym ^ av_sym ^ bo_sym ^ bv_sym
-                                    #     != self.root_sym
-                                    # ):
-                                    # continue
-                                    d = forte.Determinant()
-                                    for i in ao:
-                                        d.set_alfa_bit(i, True)
-                                    for i in av:
-                                        d.set_alfa_bit(i, True)
-                                    for i in bo:
-                                        d.set_beta_bit(i, True)
-                                    for i in bv:
-                                        d.set_beta_bit(i, True)
-                                    states.append(d)
+            states += enumerate_determinants(
+                self.nael,
+                self.nbel,
+                (self.occ, self.vir),
+                self.orbsym,
+                h,
+                p,
+                -1 if all_sym else self.root_sym,
+                ms2,
+                core,
+            )
+
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of {nhole}h{npart}p EOM states: {len(states)}")
         return sorted(states)
@@ -926,11 +907,12 @@ class SparseCC(SparseBase):
         print_eigvals=True,
         first=False,
         solver="eig",
+        core=None,
         **davidson_kwargs,
     ):
         nroots = davidson_kwargs.get("nroots", 5)
         assert solver in ["eig", "davidson"], "Invalid EOM solver"
-        eom_basis = self.make_eom_basis(nhole, npart, ms2, first=first)
+        eom_basis = self.make_eom_basis(nhole, npart, ms2, first=first, core=core)
         if solver == "eig":
             eom_eigval, eom_eigvec = self.eom_eig(eom_basis)
             eom_eigval = eom_eigval[:nroots]
