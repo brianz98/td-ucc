@@ -152,10 +152,34 @@ class SparseBase:
         td_pert += self.dip_z_op * (-field[2])
         return td_pert
 
+    @staticmethod
+    def get_properties(state, propfuncs):
+        props = np.zeros(len(propfuncs), dtype=np.complex128)
+        for i, propfunc in enumerate(propfuncs):
+            props[i] = propfunc(state)
+        return props
+
+    @staticmethod
+    def get_occ(state, orb):
+        nop = forte.SparseOperator()
+        nop.add(f"{orb}a+ {orb}a-", 1.0)
+        nop.add(f"{orb}b+ {orb}b-", 1.0)
+        return forte.overlap(state, nop @ state)
+
+    def get_dipole_x(self, state):
+        return forte.overlap(state, self.dip_x_op @ state)
+
+    def get_dipole_y(self, state):
+        return forte.overlap(state, self.dip_y_op @ state)
+
+    def get_dipole_z(self, state):
+        return forte.overlap(state, self.dip_z_op @ state)
+
     get_mo_space = NotImplemented
 
 
 class SparseCI(SparseBase):
+
     def __init__(
         self,
         mf,
@@ -332,29 +356,6 @@ class SparseCI(SparseBase):
                 xc[idx, i] = x1[ci_dets[i]]
         return xc
 
-    def get_properties(self, dets, psi, propfuncs):
-        props = np.zeros(len(propfuncs), dtype=np.complex128)
-        state = forte.SparseState({dets[i]: c for i, c in enumerate(psi)})
-        for i, propfunc in enumerate(propfuncs):
-            props[i] = propfunc(state)
-        return props
-
-    @staticmethod
-    def get_occ(state, orb):
-        nop = forte.SparseOperator()
-        nop.add(f"{orb}a+ {orb}a-", 1.0)
-        nop.add(f"{orb}b+ {orb}b-", 1.0)
-        return forte.overlap(state, nop @ state)
-
-    def get_dipole_x(self, state):
-        return forte.overlap(state, self.dip_x_op @ state)
-
-    def get_dipole_y(self, state):
-        return forte.overlap(state, self.dip_y_op @ state)
-
-    def get_dipole_z(self, state):
-        return forte.overlap(state, self.dip_z_op @ state)
-
     def kernel_td(self, psi_0, dets, fieldfunc, max_t, propfuncs, **kwargs):
         gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
         integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
@@ -366,7 +367,8 @@ class SparseCI(SparseBase):
             if integrator.status != "running":
                 break
             prop[i, 0] = integrator.t
-            prop[i, 1:] = self.get_properties(dets, integrator.y, propfuncs)
+            state = forte.SparseState({dets[i]: c for i, c in enumerate(integrator.y)})
+            prop[i, 1:] = self.get_properties(state, propfuncs)
             print(integrator.t)
             i += 1
         if integrator.status == "failed":
@@ -588,31 +590,11 @@ class SparseCC(SparseBase):
             print(f" CC energy:             {self.e_cc:20.12f} [Eh]")
             print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
 
-    def get_properties(self, propfuncs):
+    def get_properties(self, cc_state, propfuncs):
         props = np.zeros(len(propfuncs), dtype=np.complex128)
-        cc_state = self.apply_exp_op(self.op, self.ref)
         for i, propfunc in enumerate(propfuncs):
             props[i] = propfunc(cc_state)
         return props
-
-    def get_occ(self, cc_state, orb):
-        nop = forte.SparseOperator()
-        nop.add(f"{orb}a+ {orb}a-", 1.0)
-        nop.add(f"{orb}b+ {orb}b-", 1.0)
-        n_cc = forte.apply_op(nop, cc_state)
-        return forte.overlap(cc_state, n_cc)
-
-    def get_dipole_x(self, cc_state):
-        mu_cc = forte.apply_op(self.dip_x_op, cc_state)
-        return forte.overlap(cc_state, mu_cc)
-
-    def get_dipole_y(self, cc_state):
-        mu_cc = forte.apply_op(self.dip_y_op, cc_state)
-        return forte.overlap(cc_state, mu_cc)
-
-    def get_dipole_z(self, cc_state):
-        mu_cc = forte.apply_op(self.dip_z_op, cc_state)
-        return forte.overlap(cc_state, mu_cc)
 
     def kernel_td(self, tamps_0, fieldfunc, max_t, propfuncs, **kwargs):
         if self.unitary and not self.factorized:
@@ -645,7 +627,8 @@ class SparseCC(SparseBase):
                     ) / abs(self.integrator.y[ind])
             self.op.set_coefficients(list(self.integrator.y))
             prop[i, 0] = self.integrator.t
-            prop[i, 1:] = self.get_properties(propfuncs)
+            cc_state = self.apply_exp_op(self.op, self.ref)
+            prop[i, 1:] = self.get_properties(cc_state, propfuncs)
             i += 1
         return prop[:i, :]
 
@@ -827,8 +810,43 @@ class SparseCC(SparseBase):
 
         return H
 
-    def kernel_td_eom(self, eom_states, fieldfunc, max_t, propfunc, **kwargs):
-        pass
+    def sigma_vector_build(self, xs, ci_dets, hop, top):
+        xc = np.zeros_like(xs, dtype=np.complex128)
+        ndets = len(ci_dets)
+        for idx, x in enumerate(xs):
+            xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
+            ux = self.apply_exp_op(top, xstate)
+            hux = forte.apply_op(hop, ux)
+            x1 = self.apply_exp_op_inv(top, hux)
+            for i in range(ndets):
+                xc[idx, i] = x1[ci_dets[i]]
+        return xc
+
+    def evaluate_time_deriv(self, psi, dets, fieldfunc, t):
+        op_t = self.evaluate_td_pert(fieldfunc, t)
+        return (-1j) * self.sigma_vector_build(
+            [psi], dets, self.ham_op + op_t, self.op
+        )[0]
+
+    def kernel_td_eom(self, psi_0, dets, fieldfunc, max_t, propfuncs, **kwargs):
+        gradfun = lambda t, y: self.evaluate_time_deriv(y, dets, fieldfunc, t)
+        integrator = scipy.integrate.RK45(gradfun, 0.0, psi_0, max_t, **kwargs)
+        numpoints = math.ceil(max_t / kwargs["max_step"]) * 2
+        prop = np.zeros((numpoints, 1 + len(propfuncs)), dtype=np.complex128)
+        i = 0
+        while True:
+            integrator.step()
+            if integrator.status != "running":
+                break
+            prop[i, 0] = integrator.t
+            psi = forte.SparseState({dets[i]: c for i, c in enumerate(integrator.y)})
+            cc_state = self.apply_exp_op(self.op, psi)
+            prop[i, 1:] = self.get_properties(cc_state, propfuncs)
+            print(integrator.t)
+            i += 1
+        if integrator.status == "failed":
+            raise RuntimeError("Time propagation failed")
+        return prop[:i, :]
 
     def eom_eig(self, basis):
         hbar = self.make_hbar_eom(basis)
@@ -879,18 +897,7 @@ class SparseCC(SparseBase):
         guess_method = davidson_kwargs.get("guess_method", "cisd")
         davidson_kwargs.pop("guess_method", None)
         x0 = self.guess_x0(nbasis, davidson_kwargs.get("nroots", 5), guess_method)
-
-        def aop(xs):
-            xc = np.zeros_like(xs, dtype=np.complex128)
-            for idx, x in enumerate(xs):
-                xstate = forte.SparseState({d: c for d, c in zip(basis, x)})
-                ux = self.apply_exp_op(self.op, xstate)
-                hux = forte.apply_op(self.ham_op, ux)
-                uhux = self.apply_exp_op_inv(self.op, hux)
-                for i in range(nbasis):
-                    xc[idx, i] = uhux[basis[i]]
-            return xc
-
+        aop = lambda x: self.sigma_vector_build(x, basis, self.ham_op, self.op)
         conv, eigvals, eigvecs = davidson_nosym1(aop, x0, precond, **davidson_kwargs)
         if not all(conv):
             raise RuntimeError("Davidson iterations did not converge")
