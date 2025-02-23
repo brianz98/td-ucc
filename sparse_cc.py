@@ -1,20 +1,4 @@
-import itertools
-import functools
-import time
-import numpy as np
-import forte, forte.utils
-import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
-from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
-from collections import deque
-import scipy, scipy.linalg, scipy.constants, scipy.integrate
-import math
 from utils import *
-
-EH_TO_EV = scipy.constants.value("Hartree energy in eV")
-MINIMAL_PRINT_LEVEL = 1
-NORMAL_PRINT_LEVEL = 2
-DEBUG_PRINT_LEVEL = 3
-NIRREP = {"c1": 1, "cs": 2, "ci": 2, "c2": 2, "c2v": 4, "c2h": 4, "d2": 4, "d2h": 8}
 
 
 class SparseBase:
@@ -50,6 +34,9 @@ class SparseBase:
         self.occ = list(range(self.nael))
         self.vir = list(range(self.nael, self.nmo))
         self.ham_screen_thresh = ham_screen_thresh
+        self.apply_op = functools.partial(
+            forte.apply_op, screen_thresh=ham_screen_thresh
+        )
 
         # Specify the occupation of the the Hartree–Fock determinant
         self.hfref = forte.Determinant()
@@ -69,7 +56,7 @@ class SparseBase:
         self.make_s2_operator()
 
         self.ref = forte.SparseState({self.hfref: 1.0})
-        self.e_ref = forte.overlap(self.ref, forte.apply_op(self.ham_op, self.ref))
+        self.e_ref = forte.overlap(self.ref, self.apply_op(self.ham_op, self.ref))
         assert np.isclose(
             self.e_ref, mf.e_tot
         ), f"Reference energy mismatch: {self.e_ref} != {mf.e_tot}"
@@ -159,23 +146,26 @@ class SparseBase:
             props[i] = propfunc(state)
         return props
 
-    @staticmethod
-    def get_occ(state, orb):
+    def get_occ(self, state, orb):
         nop = forte.SparseOperator()
         nop.add(f"{orb}a+ {orb}a-", 1.0)
         nop.add(f"{orb}b+ {orb}b-", 1.0)
-        return forte.overlap(state, nop @ state)
+
+        return forte.overlap(state, self.apply_op(nop, state))
 
     def get_dipole_x(self, state):
-        return forte.overlap(state, self.dip_x_op @ state)
+        return forte.overlap(state, self.apply_op(self.dip_x_op, state))
 
     def get_dipole_y(self, state):
-        return forte.overlap(state, self.dip_y_op @ state)
+        return forte.overlap(state, self.apply_op(self.dip_y_op, state))
 
     def get_dipole_z(self, state):
-        return forte.overlap(state, self.dip_z_op @ state)
+        return forte.overlap(state, self.apply_op(self.dip_z_op, state))
 
     get_mo_space = NotImplemented
+    kernel = NotImplemented
+    guess_x0 = NotImplemented
+    compute_preconditioner = NotImplemented
 
 
 class SparseCI(SparseBase):
@@ -216,7 +206,7 @@ class SparseCI(SparseBase):
         hmat = np.zeros((ndets, ndets), dtype=np.complex128)
         for i in range(ndets):
             idet = forte.SparseState({dets[i]: 1.0})
-            h_idet = forte.apply_op(self.ham_op, idet)
+            h_idet = self.apply_op(self.ham_op, idet)
             for j in range(i, ndets):
                 jdet = forte.SparseState({dets[j]: 1.0})
                 hmat[i, j] = forte.overlap(jdet, h_idet)
@@ -226,7 +216,7 @@ class SparseCI(SparseBase):
     def power_method(self, psi_0, maxiter):
         psi_old = psi_0
         for i in range(maxiter):
-            psi_new = forte.apply_op(self.ham_op, psi_old)
+            psi_new = self.apply_op(self.ham_op, psi_old)
             energy = forte.overlap(psi_old, psi_new)
             print(f"Iteration {i+1}: Energy = {energy}")
             psi_old = forte.normalize(psi_new)
@@ -345,13 +335,12 @@ class SparseCI(SparseBase):
                 raise RuntimeError("Davidson iterations did not converge")
         return eigvals, eigvecs
 
-    @staticmethod
-    def sigma_vector_build(xs, ci_dets, op):
+    def sigma_vector_build(self, xs, ci_dets, op):
         xc = np.zeros_like(xs, dtype=np.complex128)
         ndets = len(ci_dets)
         for idx, x in enumerate(xs):
             xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
-            x1 = forte.apply_op(op, xstate)
+            x1 = self.apply_op(op, xstate)
             for i in range(ndets):
                 xc[idx, i] = x1[ci_dets[i]]
         return xc
@@ -497,7 +486,7 @@ class SparseCC(SparseBase):
         wfn = self.apply_exp_op(op, self.ref)
 
         # Step 2. Compute H exp(S)|Phi>
-        Hwfn = forte.apply_op(ham, wfn, screen_thresh=self.ham_screen_thresh)
+        Hwfn = self.apply_op(ham, wfn, screen_thresh=self.ham_screen_thresh)
 
         # Step 3. Compute exp(-S) H exp(S)|Phi>
         R = self.apply_exp_op_inv(op, Hwfn)
@@ -681,8 +670,8 @@ class SparseCC(SparseBase):
                 u_psi = self.apply_exp_op(u_nu, self.ref)
             else:
                 u_psi = self.apply_exp_op(u_nu, u_psi)
-            k_u_psi_a = forte.apply_op(kappa_nu_a, u_psi)
-            k_u_psi_b = forte.apply_op(kappa_nu_b, u_psi)
+            k_u_psi_a = self.apply_op(kappa_nu_a, u_psi)
+            k_u_psi_b = self.apply_op(kappa_nu_b, u_psi)
             u_k_u_psi_a = self.apply_exp_op_inv(u_nu, k_u_psi_a)
             u_k_u_psi_b = self.apply_exp_op_inv(u_nu, k_u_psi_b)
             grad_a[:, nu] = forte.get_projection(op, self.ref, u_k_u_psi_a)
@@ -795,7 +784,7 @@ class SparseCC(SparseBase):
             # exp(S)|j>
             wfn = self.apply_exp_op(self.op, basis_states[j])
             # H exp(S)|j>
-            Hwfn = forte.apply_op(self.ham_op, wfn, self.ham_screen_thresh)
+            Hwfn = forte.apply_op(self.ham_op, wfn)
             # exp(-S) H exp(S)|j>
             R = self.apply_exp_op_inv(self.op, Hwfn)
 
@@ -816,7 +805,7 @@ class SparseCC(SparseBase):
         for idx, x in enumerate(xs):
             xstate = forte.SparseState({d: c for d, c in zip(ci_dets, x)})
             ux = self.apply_exp_op(top, xstate)
-            hux = forte.apply_op(hop, ux)
+            hux = self.apply_op(hop, ux)
             x1 = self.apply_exp_op_inv(top, hux)
             for i in range(ndets):
                 xc[idx, i] = x1[ci_dets[i]]
@@ -882,7 +871,7 @@ class SparseCC(SparseBase):
         for i in range(maxspace):
             idet = forte.SparseState({basis[i]: 1.0})
             ui = self.apply_exp_op(self.op, idet)
-            hui = forte.apply_op(self.ham_op, ui)
+            hui = self.apply_op(self.ham_op, ui)
             uhui = self.apply_exp_op_inv(self.op, hui)
             precond[i] = forte.overlap(idet, uhui)
         if self.verbose >= DEBUG_PRINT_LEVEL:
@@ -904,7 +893,7 @@ class SparseCC(SparseBase):
         return eigvals, eigvecs
 
     def get_s2(self, state):
-        return forte.overlap(state, forte.apply_op(self.s2_op, state)).real
+        return forte.overlap(state, self.apply_op(self.s2_op, state)).real
 
     def run_eom(
         self,
@@ -942,42 +931,3 @@ class SparseCC(SparseBase):
                 )
             print("=" * 78)
         return eom_eigval, eom_eigvec
-
-
-class DIIS:
-    def __init__(self, nvecs=6, start=2):
-        if nvecs == None or start == None:
-            self.use_diis = False
-        else:
-            self.use_diis = True
-            self.nvecs = nvecs
-            self.start = start
-            self.error = deque(maxlen=nvecs)
-            self.vector = deque(maxlen=nvecs)
-
-    def add_vector(self, vector, error):
-        if self.use_diis == False:
-            return
-        self.vector.append(vector)
-        self.error.append(error)
-
-    def compute(self):
-        if self.use_diis == False:
-            return
-        B = np.zeros((len(self.vector), len(self.vector)))
-        for i in range(len(self.vector)):
-            for j in range(len(self.vector)):
-                B[i, j] = np.dot(self.error[i], self.error[j]).real
-        A = np.zeros((len(self.vector) + 1, len(self.vector) + 1))
-        A[:-1, :-1] = B
-        A[-1, :] = -1
-        A[:, -1] = -1
-        b = np.zeros(len(self.vector) + 1)
-        b[-1] = -1
-        x = np.linalg.solve(A, b)
-
-        new_vec = np.zeros_like(self.vector[0])
-        for i in range(len(x) - 1):
-            new_vec += x[i] * self.vector[i]
-
-        return new_vec

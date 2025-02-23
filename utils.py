@@ -1,8 +1,19 @@
-import forte, forte.utils
 import itertools
-import numpy as np
 import functools
+import time
+import numpy as np
+import forte, forte.utils
+import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
+from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
+import scipy, scipy.linalg, scipy.integrate, scipy.constants
 import math
+from collections import deque
+
+MINIMAL_PRINT_LEVEL = 1
+NORMAL_PRINT_LEVEL = 2
+DEBUG_PRINT_LEVEL = 3
+NIRREP = {"c1": 1, "cs": 2, "ci": 2, "c2": 2, "c2v": 4, "c2h": 4, "d2": 4, "d2h": 8}
+EH_TO_EV = scipy.constants.value("Hartree energy in eV")
 
 
 def sym_dir_prod(sym_list):
@@ -89,11 +100,14 @@ def enumerate_determinants(
                         bo_sym = sym_dir_prod(orbsym[list(bo)])
                         for bv in itertools.combinations(vir, bp):
                             bv_sym = sym_dir_prod(orbsym[list(bv)])
-                            if ao_sym ^ av_sym ^ bo_sym ^ bv_sym != root_sym and root_sym != -1:
+                            if (
+                                ao_sym ^ av_sym ^ bo_sym ^ bv_sym != root_sym
+                                and root_sym != -1
+                            ):
                                 continue
                             if core is not None:
                                 # no core orbital can be doubly occupied
-                                if any([(ao+bo).count(i) == 2 for i in core]):
+                                if any([(ao + bo).count(i) == 2 for i in core]):
                                     continue
                             d = forte.Determinant()
                             for i in ao:
@@ -106,3 +120,42 @@ def enumerate_determinants(
                                 d.set_beta_bit(i, True)
                             states.append(d)
     return states
+
+
+class DIIS:
+    def __init__(self, nvecs=6, start=2):
+        if nvecs == None or start == None:
+            self.use_diis = False
+        else:
+            self.use_diis = True
+            self.nvecs = nvecs
+            self.start = start
+            self.error = deque(maxlen=nvecs)
+            self.vector = deque(maxlen=nvecs)
+
+    def add_vector(self, vector, error):
+        if self.use_diis == False:
+            return
+        self.vector.append(vector)
+        self.error.append(error)
+
+    def compute(self):
+        if self.use_diis == False:
+            return
+        B = np.zeros((len(self.vector), len(self.vector)))
+        for i in range(len(self.vector)):
+            for j in range(len(self.vector)):
+                B[i, j] = np.dot(self.error[i], self.error[j]).real
+        A = np.zeros((len(self.vector) + 1, len(self.vector) + 1))
+        A[:-1, :-1] = B
+        A[-1, :] = -1
+        A[:, -1] = -1
+        b = np.zeros(len(self.vector) + 1)
+        b[-1] = -1
+        x = np.linalg.solve(A, b)
+
+        new_vec = np.zeros_like(self.vector[0])
+        for i in range(len(x) - 1):
+            new_vec += x[i] * self.vector[i]
+
+        return new_vec
