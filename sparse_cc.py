@@ -106,6 +106,9 @@ class SparseBase:
             sz.add(f"{i}b+ {i}b-", -0.5)
         self.s2_op = sup @ sdn + sz @ sz - sz
 
+    def get_s2(self, state):
+        return forte.overlap(state, self.apply_op(self.s2_op, state)).real
+
     def make_dipole_operator(self):
         nucl_dip = np.einsum("i,ix->x", self.mol.atom_charges(), self.mol.atom_coords())
         mo_dip = np.einsum(
@@ -295,10 +298,11 @@ class SparseCI(SparseBase):
         op_t = self.evaluate_td_pert(fieldfunc, t)
         return (-1j) * self.sigma_vector_build([psi], dets, self.ham_op + op_t)[0]
 
-    def kernel(self, solver, **davidson_kwargs):
+    def kernel(self, solver, print_eigvals=True, **davidson_kwargs):
         if solver not in ["eigh", "davidson"]:
             raise RuntimeError("Invalid solver")
 
+        nroots = davidson_kwargs.get("nroots", 1)
         ci_dets = self.enumerate_determinants(truncation=-1)
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"Number of determinants: {len(ci_dets)}")
@@ -320,19 +324,39 @@ class SparseCI(SparseBase):
                 pspace_dets = ci_dets[:pspace_dim]
                 x0 = self.guess_x0(
                     ndets,
-                    davidson_kwargs.get("nroots", 1),
+                    nroots,
                     guess_method,
                     dets=pspace_dets,
                 )
             else:
-                x0 = self.guess_x0(
-                    ndets, davidson_kwargs.get("nroots", 1), guess_method
-                )
+                x0 = self.guess_x0(ndets, nroots, guess_method)
 
             aop = lambda x: self.sigma_vector_build(x, ci_dets, self.ham_op)
             conv, eigvals, eigvecs = davidson1(aop, x0, precond, **davidson_kwargs)
             if not all(conv):
                 raise RuntimeError("Davidson iterations did not converge")
+            eigvecs = np.array(eigvecs).T
+
+        
+        if print_eigvals:
+            print("=" * 78)
+            print(
+                f"{'Root':^4} {'E / Eh':^20} {'ω / Eh':^20} {'ω / eV':^20} {'<S^2>':^10}"
+            )
+            print("-" * 78)
+            for i in range(nroots):
+                s2 = abs(
+                    self.get_s2(
+                        forte.SparseState(
+                            {d: c for d, c in zip(ci_dets, eigvecs[:, i])}
+                        )
+                    )
+                )
+                print(
+                    f"{i:^4d} {eigvals[i]:^20.12f} {eigvals[i] - eigvals[0]:^20.12f} {(eigvals[i] - eigvals[0]) * EH_TO_EV:^20.12f} {s2:^10.3f}"
+                )
+            print("=" * 78)
+
         return eigvals, eigvecs
 
     def sigma_vector_build(self, xs, ci_dets, op):
@@ -892,9 +916,6 @@ class SparseCC(SparseBase):
             raise RuntimeError("Davidson iterations did not converge")
         return eigvals, eigvecs
 
-    def get_s2(self, state):
-        return forte.overlap(state, self.apply_op(self.s2_op, state)).real
-
     def run_eom(
         self,
         nhole,
@@ -923,8 +944,12 @@ class SparseCC(SparseBase):
             )
             print("-" * 78)
             for i in range(nroots):
-                s2 = self.get_s2(
-                    forte.SparseState({d: c for d, c in zip(eom_basis, eom_eigvec[i])})
+                s2 = abs(
+                    self.get_s2(
+                        forte.SparseState(
+                            {d: c for d, c in zip(eom_basis, eom_eigvec[i])}
+                        )
+                    )
                 )
                 print(
                     f"{i:^4d} {eom_eigval[i]:^20.12f} {eom_eigval[i] - self.e_cc:^20.12f} {(eom_eigval[i] - self.e_cc) * EH_TO_EV:^20.12f} {s2:^10.3f}"
