@@ -547,6 +547,17 @@ class SparseCC(SparseBase):
             raise NotImplementedError(
                 "Orbital optimization is only implemented for DUCC"
             )
+        # default is to not use adaptive thresholds
+        loose_ham_thresh = kwargs.get("loose_ham_thresh", 1e-12)
+        loose_exp_thresh = kwargs.get("loose_exp_thresh", 1e-12)
+        loose_exp_max_k = kwargs.get("loose_exp_max_k", 19)
+        self.ham_screen_thresh = loose_ham_thresh
+        if not self.factorized: self.exp_op.set_maxk(loose_exp_max_k)
+        self.exp_op.set_screen_thresh(loose_exp_thresh)
+        tight_ham_thresh = kwargs.get("tight_exp_thresh", 1e-12)
+        tight_exp_thresh = kwargs.get("tight_exp_thresh", 1e-12)
+        tight_exp_max_k = kwargs.get("tight_exp_max_k", 19)
+        delta_e_switch = kwargs.get("delta_e_switch", 1e-6)
 
         diis = DIIS(diis_nvecs, diis_start)
 
@@ -590,6 +601,10 @@ class SparseCC(SparseBase):
             # 4. check for convergence of the energy
             if abs(self.e_cc - old_e) < e_conv:
                 break
+            if abs(self.e_cc - old_e) < delta_e_switch:
+                if not self.factorized: self.exp_op.set_maxk(tight_exp_max_k)
+                self.exp_op.set_screen_thresh(tight_exp_thresh)
+                self.ham_screen_thresh = tight_ham_thresh
             old_e = self.e_cc
 
         if iter == maxiter - 1:
