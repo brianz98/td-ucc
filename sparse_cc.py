@@ -1,3 +1,4 @@
+import scipy.optimize
 from utils import *
 
 
@@ -337,7 +338,6 @@ class SparseCI(SparseBase):
                 raise RuntimeError("Davidson iterations did not converge")
             eigvecs = np.array(eigvecs).T
 
-        
         if print_eigvals:
             print("=" * 78)
             print(
@@ -494,7 +494,7 @@ class SparseCC(SparseBase):
 
         self.nt1 = len(self.t1)
         self.op = self.t1 + self.tn
-        self.op_td = self.t1 + self.tn
+        self.op_temp = self.t1 + self.tn
         self.denominators = self.t1_denom + self.tn_denom
         if self.verbose >= NORMAL_PRINT_LEVEL:
             print(f"\n==> Cluster operator <==")
@@ -537,6 +537,85 @@ class SparseCC(SparseBase):
         else:
             return tamps
 
+    def evaluate_variational_functional(self, tamps, ham):
+        """
+        Evaluate the variational functional for the CC energy:
+        E = <Phi|exp(-S) H exp(S)|Phi> / <Phi|Phi>
+        """
+        self.op_temp.set_coefficients(list(tamps))
+        # Step 1. Compute exp(S)|Phi>
+        wfn = self.apply_exp_op(self.op_temp, self.ref)
+
+        # Step 2. Compute H exp(S)|Phi>
+        Hwfn = self.apply_op(ham, wfn, screen_thresh=self.ham_screen_thresh)
+
+        # Step 3. Compute <Phi|exp(-S) H exp(S)|Phi>
+        energy = forte.overlap(wfn, Hwfn) / forte.overlap(wfn, wfn)
+
+        return energy.real
+
+    def evaluate_variational_functional_gradient(self, tamps, ham):
+        """
+        Evaluate the gradient of the variational functional for the CC energy
+        """
+        self.op_temp.set_coefficients(list(tamps))
+        grad = np.zeros_like(tamps, dtype=np.float64)
+        psi = self.apply_exp_op(self.op_temp, self.ref)
+        sigma = self.apply_op(ham, psi, screen_thresh=self.ham_screen_thresh)
+        for mu in range(len(tamps)):
+            mu_tuple = self.op_temp(mu)
+            op_mu = forte.SparseOperatorList()
+            op_mu.add(mu_tuple[0], mu_tuple[1])
+            kappa_mu = forte.SparseOperator()
+            kappa_mu.add(mu_tuple[0], 1.0)
+            if mu != 0:
+                psi = self.apply_exp_op(op_mu, psi, inverse=True)
+                sigma = self.apply_exp_op(op_mu, sigma, inverse=True)
+            grad[mu] = forte.overlap(sigma, forte.apply_antiherm(kappa_mu, psi)).real
+
+        return grad
+
+    def report_iteration(self, intermediate_result):
+        self._k_counter += 1
+        delta_e = intermediate_result.fun - self._e_old
+        self._e_old = intermediate_result.fun
+        self.e_cc = intermediate_result.fun
+        dt = time.time() - self._time
+        self._time = time.time()
+        if self._k_counter == 1:
+            print("=" * 65)
+            print(f"{'Iter':<9} {'Energy':<20} {'Delta Energy':<20} {'Time':<11}")
+            print("-" * 65)
+        print(
+            f"{self._k_counter:<9d} {self.e_cc:<20.12f} {delta_e:<20.12f} {dt:<11.3f}"
+        )
+
+    def kernel_variational(self, **kwargs):
+        e_conv = kwargs.get("e_conv", 1e-12)
+        start = time.time()
+        tamps = np.zeros(len(self.op), dtype=np.float64)
+        self._k_counter = 0
+        self._e_old = 0.0
+        self._time = time.time()
+        res = scipy.optimize.minimize(
+            self.evaluate_variational_functional,
+            tamps,
+            args=(self.ham_op,),
+            method="BFGS",
+            jac=self.evaluate_variational_functional_gradient,
+            options={"gtol": e_conv},
+            callback=self.report_iteration,
+        )
+        print("=" * 65)
+        self.e_cc = res.fun
+        self.e_corr = self.e_cc - self.mf.e_tot
+        if self.verbose >= MINIMAL_PRINT_LEVEL:
+            print(f" CC energy:             {self.e_cc:20.12f} [Eh]")
+            print(f" CC correlation energy: {self.e_corr:20.12f} [Eh]")
+            print(f" Total time: {time.time()-start:11.3f} [s]")
+        if self.verbose >= DEBUG_PRINT_LEVEL:
+            print(res)
+
     def kernel(self, **kwargs):
         e_conv = kwargs.get("e_conv", 1e-12)
         maxiter = kwargs.get("maxiter", 100)
@@ -552,7 +631,8 @@ class SparseCC(SparseBase):
         loose_exp_thresh = kwargs.get("loose_exp_thresh", 1e-12)
         loose_exp_max_k = kwargs.get("loose_exp_max_k", 19)
         self.ham_screen_thresh = loose_ham_thresh
-        if not self.factorized: self.exp_op.set_maxk(loose_exp_max_k)
+        if not self.factorized:
+            self.exp_op.set_maxk(loose_exp_max_k)
         self.exp_op.set_screen_thresh(loose_exp_thresh)
         tight_ham_thresh = kwargs.get("tight_exp_thresh", 1e-12)
         tight_exp_thresh = kwargs.get("tight_exp_thresh", 1e-12)
@@ -602,7 +682,8 @@ class SparseCC(SparseBase):
             if abs(self.e_cc - old_e) < e_conv:
                 break
             if abs(self.e_cc - old_e) < delta_e_switch:
-                if not self.factorized: self.exp_op.set_maxk(tight_exp_max_k)
+                if not self.factorized:
+                    self.exp_op.set_maxk(tight_exp_max_k)
                 self.exp_op.set_screen_thresh(tight_exp_thresh)
                 self.ham_screen_thresh = tight_ham_thresh
             old_e = self.e_cc
@@ -669,13 +750,13 @@ class SparseCC(SparseBase):
         The imaginary unit is not put in, this is for a unified interface
         with imaginary time relaxation.
         """
-        self.op_td.set_coefficients(list(tamps))
+        self.op_temp.set_coefficients(list(tamps))
         if fieldfunc is not None:
             op_t = self.evaluate_td_pert(fieldfunc, t)
-            residual, _ = self.cc_residual_equations(self.op_td, self.ham_op + op_t)
+            residual, _ = self.cc_residual_equations(self.op_temp, self.ham_op + op_t)
         else:
-            residual, _ = self.cc_residual_equations(self.op_td, self.ham_op)
-        grad_a, grad_b = self.evaluate_grad_ovlp(self.op_td)
+            residual, _ = self.cc_residual_equations(self.op_temp, self.ham_op)
+        grad_a, grad_b = self.evaluate_grad_ovlp(self.op_temp)
         grad_block = np.block(
             [[np.real(grad_a), np.imag(grad_b)], [np.imag(grad_a), np.real(grad_b)]]
         )

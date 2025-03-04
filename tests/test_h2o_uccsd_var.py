@@ -6,7 +6,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from sparse_cc import *
 
 
-def test_h2o_uccsd():
+def test_h2o_uccsd_var():
     mol = pyscf.gto.M(
         atom="""
     O
@@ -17,12 +17,12 @@ def test_h2o_uccsd():
     )
     mf = pyscf.scf.RHF(mol)
     mf.kernel()
-    cc = SparseCC(mf, verbose=2, cc_type="ucc")
+    cc = SparseCC(mf,verbose=2, cc_type="ducc")
 
     cc.make_cluster_operator(max_exc=2)
-    cc.kernel()
-    assert np.isclose(cc.e_corr, -0.071348847272, atol=1e-8)
+    cc.kernel_variational()
+    assert np.isclose(cc.e_corr, -0.071355481853, atol=1e-8)
 
 
 if __name__ == "__main__":
-    test_h2o_uccsd()
+    test_h2o_uccsd_var()

@@ -5,7 +5,7 @@ import numpy as np
 import forte, forte.utils
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
 from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
-import scipy, scipy.linalg, scipy.integrate, scipy.constants
+import scipy, scipy.linalg, scipy.integrate, scipy.constants, scipy.optimize
 import math
 from collections import deque
 
