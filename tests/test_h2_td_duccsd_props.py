@@ -33,7 +33,8 @@ def test_h2_td_duccsd_occ():
     cc.make_dipole_operator()
     cc.make_cluster_operator(max_exc=2)
     cc.kernel()
-    tamps_0 = np.array(cc.op.coefficients())
+    # tamps_0 = np.concat([[0.0],np.array(cc.op.coefficients())])
+    tamps_0 = cc.op.coefficients()
     occ = cc.kernel_td(
         tamps_0=tamps_0,
         fieldfunc=td_pert,
@@ -44,10 +45,10 @@ def test_h2_td_duccsd_occ():
         ],
         max_step=0.01,
     )
-    assert np.isclose(np.real(occ[-1, 1]), 1.96693464, atol=1e-8)
-    assert np.isclose(np.imag(occ[-1, 1]), 0.0, atol=1e-12)
-    assert np.isclose(np.real(occ[-1, 2]), 1.76316591e-05, atol=1e-8)
-    assert np.isclose(np.imag(occ[-1, 2]), 0.0, atol=1e-12)
+    assert np.isclose(np.real(occ[-1, 1]), 1.96693464, atol=1e-8), np.real(occ[-1, 1])
+    assert np.isclose(np.imag(occ[-1, 1]), 0.0, atol=1e-12), np.imag(occ[-1, 1])
+    assert np.isclose(np.real(occ[-1, 2]), 1.76316591e-05, atol=1e-8), np.real(occ[-1, 2])
+    assert np.isclose(np.imag(occ[-1, 2]), 0.0, atol=1e-12), np.imag(occ[-1, 2])
 
 
 if __name__ == "__main__":

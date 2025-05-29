@@ -75,6 +75,7 @@ def make_tn_operator(exc, eps, orbs, orbsym, root_sym, pair=None, general=False)
                         for i in reversed(ao):
                             op_str.append(f"{i}a-")
                         op.add(f"{' '.join(op_str)}", 0.0)
+
     return op, denom
 
 
