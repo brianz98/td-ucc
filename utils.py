@@ -2,7 +2,7 @@ import itertools
 import functools
 import time
 import numpy as np
-import forte, forte.utils
+import forte2 as forte
 import pyscf, pyscf.cc, pyscf.mp, pyscf.fci
 from pyscf.lib.linalg_helper import davidson1, davidson_nosym1
 import scipy, scipy.linalg, scipy.integrate, scipy.constants, scipy.optimize
@@ -110,15 +110,15 @@ def enumerate_determinants(
                                 # no core orbital can be doubly occupied
                                 if any([(ao + bo).count(i) == 2 for i in core]):
                                     continue
-                            d = forte.Determinant()
+                            d = forte.Determinant.zero()
                             for i in ao:
-                                d.set_alfa_bit(i, True)
+                                d.set_na(i, True)
                             for i in av:
-                                d.set_alfa_bit(i, True)
+                                d.set_na(i, True)
                             for i in bo:
-                                d.set_beta_bit(i, True)
+                                d.set_nb(i, True)
                             for i in bv:
-                                d.set_beta_bit(i, True)
+                                d.set_nb(i, True)
                             states.append(d)
     return states
 
